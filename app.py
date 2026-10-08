@@ -100,13 +100,19 @@ TEAM_FORM_COLS = [
 ]
 
 
+def debug_enabled() -> bool:
+    return bool(st.session_state.get("debug_mode", False))
+
+
 def ui_log(message: str, level: str = "info") -> None:
-    line = f"{datetime.now().strftime('%H:%M:%S')} | {message}"
-    st.session_state.setdefault("ui_logs", []).append(line)
     if level == "error":
         log.error(message)
     else:
         log.info(message)
+    if not debug_enabled():
+        return
+    line = f"{datetime.now().strftime('%H:%M:%S')} | {message}"
+    st.session_state.setdefault("ui_logs", []).append(line)
 
 
 def _round(df: pd.DataFrame) -> pd.DataFrame:
@@ -191,7 +197,9 @@ def render_game_trend(logs: pd.DataFrame) -> None:
 
 
 def render_logs_panel() -> None:
-    with st.expander("Debug logs", expanded=bool(st.session_state.get("ui_logs"))):
+    if not debug_enabled():
+        return
+    with st.expander("Debug logs", expanded=True):
         st.caption(f"Also written to `{LOG_PATH}`")
         logs = st.session_state.get("ui_logs") or ["No log lines yet."]
         st.code("\n".join(logs[-80:]), language="text")
@@ -389,6 +397,7 @@ def main() -> None:
         )
         load = st.button("Load team", type="primary", use_container_width=True)
         clear = st.button("Clear cache", use_container_width=True)
+        st.toggle("Debug mode", value=False, key="debug_mode")
         if clear:
             st.cache_data.clear()
             st.session_state.pop("team_form", None)
@@ -512,8 +521,8 @@ def main() -> None:
                 st.session_state.pop("matchup", None)
                 if cross.empty:
                     st.warning(
-                        "No game logs returned. Check Debug logs "
-                        "(bad Player_ID or registration lookup is the usual cause)."
+                        "No game logs returned. Enable **Debug mode** in the sidebar "
+                        "if you need details (bad Player_ID / registration lookup is usual)."
                     )
                 else:
                     st.success(f"Loaded {len(cross)} games for {player_name}.")
