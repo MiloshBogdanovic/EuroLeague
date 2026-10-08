@@ -1,0 +1,3 @@
+Season,Gamecode,Home,Player_ID,IsStarter,IsPlaying,Team,Dorsal,Player,Minutes,Points,FieldGoalsMade2,FieldGoalsAttempted2,FieldGoalsMade3,FieldGoalsAttempted3,FreeThrowsMade,FreeThrowsAttempted,OffensiveRebounds,DefensiveRebounds,TotalRebounds,Assistances,Steals,Turnovers,BlocksFavour,BlocksAgainst,FoulsCommited,FoulsReceived,Valuation,Plusminus,date,round,home_team,away_team,MinutesFloat,FGM3,FGA3,PIR_per_min,Opponent,HomeAway
+2024,26,1,013369,0,1.0,PAR,2,"JONES, CARLIK",23:14,14,4,6,0,2,6,6,0,5,5,3,1,4,1,0,1,4,19,7.0,2024-10-15,RS,PAR,MUN,23.233333333333334,0,2,0.8177905308464849,MUN,H
+2024,283,0,013369,1,1.0,PAR,2,"JONES, CARLIK",35:10,19,7,10,1,4,2,2,0,1,1,10,1,2,0,0,2,3,24,-13.0,2025-03-27,RS,MUN,PAR,35.166666666666664,1,4,0.6824644549763034,MUN,A

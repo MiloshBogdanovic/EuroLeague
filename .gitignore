@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+
+# Runtime logs only — keep CSV caches in git for fewer API calls on deploy
+data/*.log
+*.log

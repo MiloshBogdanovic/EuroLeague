@@ -1,0 +1,5 @@
+Season,Gamecode,Home,Player_ID,IsStarter,IsPlaying,Team,Dorsal,Player,Minutes,Points,FieldGoalsMade2,FieldGoalsAttempted2,FieldGoalsMade3,FieldGoalsAttempted3,FreeThrowsMade,FreeThrowsAttempted,OffensiveRebounds,DefensiveRebounds,TotalRebounds,Assistances,Steals,Turnovers,BlocksFavour,BlocksAgainst,FoulsCommited,FoulsReceived,Valuation,Plusminus,date,round,home_team,away_team,MinutesFloat,FGM3,FGA3,PIR_per_min,Opponent,HomeAway
+2024,34,0,003469,1,1.0,OLY,14,"VEZENKOV, SASHA",30:05,16,5,10,1,3,3,3,2,4,6,2,0,1,1,0,1,1,17,9.0,2024-10-18,RS,IST,OLY,30.083333333333332,1,3,0.5650969529085873,IST,A
+2024,215,1,003469,1,1.0,OLY,14,"VEZENKOV, SASHA",31:34,26,8,11,2,3,4,6,2,7,9,1,0,1,1,0,3,7,34,14.0,2025-01-31,RS,OLY,IST,31.566666666666666,2,3,1.0770855332629357,IST,H
+2025,34,1,003469,1,1.0,OLY,14,"VEZENKOV, SASHA",29:54,12,2,3,0,3,8,9,1,6,7,1,1,3,0,0,0,6,19,-2.0,2025-10-14,RS,OLY,IST,29.9,0,3,0.6354515050167224,IST,H
+2025,231,0,003469,1,1.0,OLY,14,"VEZENKOV, SASHA",25:55,19,5,8,1,6,6,7,0,5,5,1,0,1,1,1,0,5,20,5.0,2026-01-22,RS,IST,OLY,25.916666666666668,1,6,0.7717041800643086,IST,A
