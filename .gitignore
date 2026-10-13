@@ -15,6 +15,6 @@ data/*.log
 tools/admiralbet_mcp/
 **/admiralbet_mcp/__pycache__/
 
-# Live odds dumps (local refresh / MCP only)
-data/admiralbet_*.json
+# Local odds scratch / MCP dumps (keep admiralbet_lines.json tracked for Cloud UI)
+data/admiralbet_capture.json
 data/_ab_*.json

@@ -7,6 +7,7 @@ Used by the Streamlit app (read + optional refresh) and by tools/admiralbet_mcp.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import unicodedata
@@ -14,6 +15,23 @@ from pathlib import Path
 from typing import Any
 
 from euro_utils import DATA_DIR
+
+
+def is_streamlit_cloud() -> bool:
+    """Streamlit Community Cloud runs as appuser under /home/appuser."""
+    home = Path.home().as_posix()
+    return home.startswith("/home/appuser") or bool(os.environ.get("STREAMLIT_SHARING_MODE"))
+
+
+def playwright_ready() -> tuple[bool, str]:
+    """Return (ok, reason) for local scrape availability."""
+    if is_streamlit_cloud():
+        return False, "AdmiralBet scrape is local-only (not available on Streamlit Cloud)."
+    try:
+        import playwright  # noqa: F401
+    except ImportError:
+        return False, "Playwright not installed. Locally: pip install playwright && playwright install chromium"
+    return True, ""
 
 LINES_PATH = DATA_DIR / "admiralbet_lines.json"
 CAPTURE_PATH = DATA_DIR / "admiralbet_capture.json"
@@ -293,14 +311,42 @@ async def fetch_euroleague_player_totals_async(
     markets: list[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Playwright scrape of Evroliga player O/U tabs; writes admiralbet_lines.json."""
-    from playwright.async_api import async_playwright
+    ok, reason = playwright_ready()
+    if not ok:
+        return {
+            "saved_to": None,
+            "error": reason,
+            "summary": {"row_count": 0, "by_market": {}},
+            "lines": [],
+        }
+
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        return {
+            "saved_to": None,
+            "error": f"Playwright import failed: {exc}",
+            "summary": {"row_count": 0, "by_market": {}},
+            "lines": [],
+        }
 
     tabs = markets or MARKET_TABS
     all_rows: list[dict[str, Any]] = []
     seen_keys: set[str] = set()
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        try:
+            browser = await p.chromium.launch(headless=True)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "saved_to": None,
+                "error": (
+                    f"Playwright browser missing ({exc}). "
+                    "Locally run: python -m playwright install chromium"
+                ),
+                "summary": {"row_count": 0, "by_market": {}},
+                "lines": [],
+            }
         context = await browser.new_context(
             locale="sr-Latn-RS",
             viewport={"width": 1400, "height": 900},

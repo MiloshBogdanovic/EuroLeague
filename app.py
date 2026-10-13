@@ -20,8 +20,10 @@ import streamlit as st
 from euro_admiralbet import (
     STAT_LABELS,
     fetch_euroleague_player_totals,
+    is_streamlit_cloud,
     load_admiralbet_lines,
     match_player_lines,
+    playwright_ready,
 )
 from euro_utils import (
     DATA_DIR,
@@ -688,27 +690,35 @@ def main() -> None:
         st.subheader("AdmiralBet odds")
         odds_meta = load_admiralbet_lines()
         st.caption(
-            f"File: {odds_meta.get('path') or 'missing'} · "
             f"rows={odds_meta.get('summary', {}).get('row_count', 0)} · "
             f"fetched={odds_meta.get('fetched_at') or '—'}"
         )
-        refresh_odds = st.button(
-            "Refresh AdmiralBet lines",
-            help="Local Playwright scrape of Evroliga player O/U (PTS/AST/REB/3PM). Not used on Streamlit Cloud.",
-        )
-        if refresh_odds:
-            with st.spinner("Scraping AdmiralBet Evroliga player totals…"):
-                try:
-                    result = fetch_euroleague_player_totals(wait_ms=12000)
-                    ui_log(f"AdmiralBet refresh: {result.get('summary')}")
-                    st.success(f"Saved {result.get('summary', {}).get('row_count', 0)} lines.")
-                except Exception as exc:  # noqa: BLE001
-                    ui_log(f"AdmiralBet refresh failed: {exc}\n{traceback.format_exc()}", "error")
-                    st.error(
-                        f"Refresh failed ({exc}). "
-                        "Use MCP `admiralbet_fetch_euroleague_player_totals` locally, "
-                        "or keep the last `data/admiralbet_lines.json`."
-                    )
+        scrape_ok, scrape_reason = playwright_ready()
+        if is_streamlit_cloud() or not scrape_ok:
+            st.info(
+                "Cloud uses the committed `data/admiralbet_lines.json` snapshot. "
+                "Refresh odds locally (MCP or sidebar), then push that file to update the deploy."
+            )
+            if scrape_reason and not is_streamlit_cloud():
+                st.caption(scrape_reason)
+        else:
+            refresh_odds = st.button(
+                "Refresh AdmiralBet lines",
+                help="Local Playwright scrape of Evroliga player O/U (PTS/AST/REB/3PM).",
+            )
+            if refresh_odds:
+                with st.spinner("Scraping AdmiralBet Evroliga player totals…"):
+                    try:
+                        result = fetch_euroleague_player_totals(wait_ms=12000)
+                        if result.get("error"):
+                            st.warning(result["error"])
+                            ui_log(f"AdmiralBet refresh: {result.get('error')}", "error")
+                        else:
+                            ui_log(f"AdmiralBet refresh: {result.get('summary')}")
+                            st.success(f"Saved {result.get('summary', {}).get('row_count', 0)} lines.")
+                    except Exception as exc:  # noqa: BLE001
+                        ui_log(f"AdmiralBet refresh failed: {exc}\n{traceback.format_exc()}", "error")
+                        st.error(f"Refresh failed: {exc}")
         if clear:
             st.cache_data.clear()
             st.session_state.pop("team_form", None)
