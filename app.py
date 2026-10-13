@@ -12,9 +12,17 @@ import logging
 import traceback
 from datetime import datetime
 
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import streamlit as st
 
+from euro_admiralbet import (
+    STAT_LABELS,
+    fetch_euroleague_player_totals,
+    load_admiralbet_lines,
+    match_player_lines,
+)
 from euro_utils import (
     DATA_DIR,
     annotate_vs_specific_defenders,
@@ -156,15 +164,25 @@ def render_team_table(form: pd.DataFrame) -> None:
     st.dataframe(view, width="stretch", hide_index=True, height=420)
 
 
+FORM_METRICS = (
+    ("MinutesFloat", "Minutes", "MIN"),
+    ("Points", "Points", "PTS"),
+    ("FGM3", "3PM", "3PM"),
+    ("Assists", "Assists", "AST"),
+    ("TotalRebounds", "Rebounds", "REB"),
+)
+
+
 def render_window_bars(windows: pd.DataFrame, title: str) -> None:
     if windows.empty:
         st.info("No window stats.")
         return
     w = _round(windows.set_index("window"))
-    metrics = [c for c in ["pts_avg", "reb_avg", "fgm3_avg", "pir_avg", "pir_per_min", "min_avg"] if c in w.columns]
+    metrics = [c for c in ["pts_avg", "reb_avg", "ast_avg", "fgm3_avg", "pir_avg", "pir_per_min", "min_avg"] if c in w.columns]
     labels = {
         "pts_avg": "Points",
         "reb_avg": "Rebounds",
+        "ast_avg": "Assists",
         "fgm3_avg": "3PM",
         "pir_avg": "PIR",
         "pir_per_min": "PIR/min",
@@ -184,16 +202,284 @@ def render_window_bars(windows: pd.DataFrame, title: str) -> None:
     st.bar_chart(chart_df, height=280)
 
 
-def render_game_trend(logs: pd.DataFrame) -> None:
-    if logs.empty:
+def _played_logs(logs: pd.DataFrame) -> pd.DataFrame:
+    if logs is None or logs.empty:
+        return pd.DataFrame()
+    out = logs.copy()
+    if "Assists" not in out.columns and "Assistances" in out.columns:
+        out["Assists"] = pd.to_numeric(out["Assistances"], errors="coerce")
+    if "date" in out.columns:
+        out["date"] = pd.to_datetime(out["date"], errors="coerce")
+    if "MinutesFloat" in out.columns:
+        out = out[out["MinutesFloat"].fillna(0) > 0]
+    return out.sort_values("date")
+
+
+def _baseline_avgs(logs: pd.DataFrame) -> dict[str, float]:
+    use = _played_logs(logs)
+    if use.empty:
+        return {col: float("nan") for col, _, _ in FORM_METRICS}
+    out = {}
+    for col, _, _ in FORM_METRICS:
+        if col in use.columns:
+            out[col] = float(pd.to_numeric(use[col], errors="coerce").mean())
+        else:
+            out[col] = float("nan")
+    return out
+
+
+def _recent_games(logs: pd.DataFrame, n: int) -> pd.DataFrame:
+    use = _played_logs(logs).tail(n).copy()
+    if use.empty:
+        return use
+    use["label"] = use["date"].dt.strftime("%m-%d") + "\nvs " + use["Opponent"].astype(str)
+    return use
+
+
+def _fmt_base(v: float) -> str:
+    return f"{v:.1f}" if pd.notna(v) else "—"
+
+
+def _plot_games_vs_baseline(
+    games: pd.DataFrame,
+    col: str,
+    label: str,
+    baseline: float,
+    baseline_name: str,
+    market_line: float | None = None,
+) -> None:
+    """One chart: each match value + baseline (+ optional AdmiralBet line)."""
+    if games.empty or col not in games.columns or pd.isna(baseline):
+        st.caption(f"No data for {label}.")
         return
-    g = logs.sort_values("date").copy()
-    g["label"] = g["date"].dt.strftime("%m-%d") + " vs " + g["Opponent"].astype(str)
-    plot = g.set_index("label")[["Points", "Valuation", "PIR_per_min"]].rename(
-        columns={"Valuation": "PIR", "PIR_per_min": "PIR/min"}
+
+    vals = pd.to_numeric(games[col], errors="coerce").tolist()
+    labels = games["label"].tolist()
+    finite = [v for v in vals if pd.notna(v)]
+    y_pad = (max(finite) * 0.12) if finite else 0.5
+    x = np.arange(len(vals))
+    ref = float(market_line) if market_line is not None and pd.notna(market_line) else baseline
+    colors = []
+    for v in vals:
+        if pd.isna(v):
+            colors.append("#888888")
+        elif v > ref:
+            colors.append("#2ecc71")
+        elif v < ref:
+            colors.append("#e74c3c")
+        else:
+            colors.append("#95a5a6")
+
+    fig, ax = plt.subplots(figsize=(6.8, 3.4), dpi=120)
+    ax.set_facecolor("#0e1117")
+    fig.patch.set_facecolor("#0e1117")
+    bars = ax.bar(x, [0.0 if pd.isna(v) else float(v) for v in vals], color=colors, width=0.65, zorder=2)
+    ax.axhline(
+        baseline,
+        color="#f1c40f",
+        linestyle="--",
+        linewidth=1.8,
+        zorder=3,
+        label=f"{baseline_name}: {baseline:.1f}",
     )
-    st.markdown("**Game-by-game trend**")
-    st.line_chart(plot, height=300)
+    if market_line is not None and pd.notna(market_line):
+        ax.axhline(
+            float(market_line),
+            color="#3498db",
+            linestyle=":",
+            linewidth=2.0,
+            zorder=4,
+            label=f"AdmiralBet O/U: {float(market_line):.1f}",
+        )
+    for bar, v in zip(bars, vals):
+        if pd.isna(v):
+            continue
+        delta = float(v) - ref
+        tag = "OVER" if delta > 0 else ("UNDER" if delta < 0 else "FLAT")
+        val_txt = f"{v:.1f}" if label == "Minutes" else f"{v:.0f}"
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            float(v) + y_pad * 0.35,
+            f"{val_txt}\n{tag}",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            color="#fafafa",
+        )
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=8, color="#fafafa")
+    ax.set_ylabel(label, color="#fafafa")
+    title = f"{label} — each game vs {baseline_name}"
+    if market_line is not None and pd.notna(market_line):
+        title += " · blue = market line"
+    ax.set_title(title, color="#fafafa", fontsize=11)
+    ax.tick_params(colors="#fafafa")
+    refs = [baseline, *finite]
+    if market_line is not None and pd.notna(market_line):
+        refs.append(float(market_line))
+    ymax = max(refs + [1]) + y_pad
+    ax.set_ylim(0, ymax)
+    for spine in ax.spines.values():
+        spine.set_color("#444")
+    ax.legend(facecolor="#1a1a1a", edgecolor="#444", labelcolor="#fafafa", fontsize=8)
+    ax.grid(axis="y", color="#333", linestyle=":", linewidth=0.6, zorder=1)
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+    plt.close(fig)
+
+
+def _baseline_metric_row(title: str, games_n: int, baseline: dict[str, float]) -> None:
+    st.markdown(f"**{title}** · {games_n} games")
+    cols = st.columns(len(FORM_METRICS))
+    for widget, (col, _label, short) in zip(cols, FORM_METRICS):
+        widget.metric(short, _fmt_base(baseline.get(col)))
+
+
+def _metric_game_table(
+    games: pd.DataFrame,
+    col: str,
+    label: str,
+    short: str,
+    baseline: float,
+) -> pd.DataFrame:
+    rows = []
+    for _, g in games.iterrows():
+        val = float(pd.to_numeric(g.get(col), errors="coerce")) if col in g.index else float("nan")
+        if pd.notna(val) and pd.notna(baseline):
+            delta = val - baseline
+            vs = f"{delta:+.1f} {'OVER' if delta > 0 else ('UNDER' if delta < 0 else 'FLAT')}"
+        else:
+            vs = "—"
+        rows.append(
+            {
+                "Game": str(g["label"]).replace("\n", " "),
+                label: val,
+                f"{short} vs BL": vs,
+            }
+        )
+    return _round(pd.DataFrame(rows))
+
+
+def render_player_form_vs_baselines(
+    season: int,
+    this_season_logs: pd.DataFrame,
+    combined_logs: pd.DataFrame,
+    player_name: str | None = None,
+    team_hint: str | None = None,
+) -> None:
+    """Highlight two baselines, AdmiralBet O/U lines, then form charts."""
+    cur = _played_logs(this_season_logs)
+    comb = _played_logs(combined_logs)
+    if cur.empty and comb.empty:
+        st.warning("No played games for baselines.")
+        return
+
+    bl_cur = _baseline_avgs(cur)
+    bl_comb = _baseline_avgs(comb)
+
+    market_by_stat: dict[str, dict] = {}
+    if player_name:
+        market_by_stat = match_player_lines(player_name, team_hint=team_hint)
+        ui_log(
+            f"AdmiralBet match for {player_name}: "
+            + (
+                ", ".join(f"{STAT_LABELS.get(k, k)}={v.get('line')}" for k, v in market_by_stat.items())
+                if market_by_stat
+                else "no lines"
+            )
+        )
+
+    st.markdown("### Baselines")
+    st.caption(
+        "Two reference averages: **this season**, and **this + last season** "
+        "(MIN / PTS / 3PM / AST / REB). Pick one baseline; each chart has its own form window."
+    )
+    left, right = st.columns(2)
+    with left:
+        _baseline_metric_row(f"This season ({season})", len(cur), bl_cur)
+    with right:
+        _baseline_metric_row(f"This + last season ({season - 1}/{season})", len(comb), bl_comb)
+
+    st.markdown("### AdmiralBet lines")
+    odds_payload = load_admiralbet_lines()
+    fetched = odds_payload.get("fetched_at") or "never"
+    if not market_by_stat:
+        st.caption(
+            f"No matching O/U lines for **{player_name or 'this player'}** "
+            f"(last odds file: {fetched}). Refresh from the sidebar after MCP/local scrape."
+        )
+    else:
+        st.caption(
+            f"Matched from `data/admiralbet_lines.json` · fetched {fetched}. "
+            "Blue dotted line on charts = market O/U; bar colors use the market line when present."
+        )
+        mcols = st.columns(max(len(market_by_stat), 1))
+        for widget, (stat, row) in zip(mcols, market_by_stat.items()):
+            short = STAT_LABELS.get(stat, stat)
+            line = row.get("line")
+            u, o = row.get("under_odds"), row.get("over_odds")
+            odds = ""
+            if u is not None and o is not None:
+                odds = f"U {u} / O {o}"
+            widget.metric(short, _fmt_base(float(line) if line is not None else float("nan")), odds or None)
+
+    st.markdown("### Current form vs baseline")
+    baseline_choice = st.radio(
+        "Baseline",
+        options=["this_season", "combined"],
+        format_func=lambda x: (
+            f"This season ({season})"
+            if x == "this_season"
+            else f"This + last season ({season - 1}/{season})"
+        ),
+        horizontal=True,
+        key="form_baseline_choice",
+    )
+
+    if baseline_choice == "this_season":
+        baseline = bl_cur
+        baseline_name = f"Season {season}"
+    else:
+        baseline = bl_comb
+        baseline_name = f"{season - 1}/{season}"
+    form_source = comb if not comb.empty else cur
+
+    st.caption(
+        f"Comparing to **{baseline_name}** baseline. "
+        "Green = over · Red = under · Yellow dashed = baseline · Blue dotted = AdmiralBet. "
+        "Each graph picks last 3 / 5 / 7 games (default 3)."
+    )
+
+    for col, label, short in FORM_METRICS:
+        st.markdown(f"#### {label}")
+        n_pick = st.radio(
+            f"Form window — {label}",
+            options=[3, 5, 7],
+            index=0,
+            format_func=lambda x: f"Last {x} games",
+            horizontal=True,
+            key=f"form_n_{short}",
+        )
+        games = _recent_games(form_source, int(n_pick))
+        if games.empty:
+            st.caption(f"Not enough games for {label}.")
+            continue
+        mrow = market_by_stat.get(col)
+        mline = float(mrow["line"]) if mrow and mrow.get("line") is not None else None
+        bl_val = baseline.get(col, float("nan"))
+        _plot_games_vs_baseline(games, col, label, bl_val, baseline_name, market_line=mline)
+        table = _metric_game_table(games, col, label, short, bl_val)
+        if mline is not None and not table.empty and label in table.columns:
+            deltas = []
+            for v in table[label]:
+                try:
+                    fv = float(v)
+                    d = fv - mline
+                    deltas.append(f"{d:+.1f} {'OVER' if d > 0 else ('UNDER' if d < 0 else 'FLAT')}")
+                except (TypeError, ValueError):
+                    deltas.append("—")
+            table[f"{short} vs MKT"] = deltas
+        st.dataframe(table, width="stretch", hide_index=True)
 
 
 def render_logs_panel() -> None:
@@ -398,6 +684,31 @@ def main() -> None:
         load = st.button("Load team", type="primary", use_container_width=True)
         clear = st.button("Clear cache", use_container_width=True)
         st.toggle("Debug mode", value=False, key="debug_mode")
+        st.divider()
+        st.subheader("AdmiralBet odds")
+        odds_meta = load_admiralbet_lines()
+        st.caption(
+            f"File: {odds_meta.get('path') or 'missing'} · "
+            f"rows={odds_meta.get('summary', {}).get('row_count', 0)} · "
+            f"fetched={odds_meta.get('fetched_at') or '—'}"
+        )
+        refresh_odds = st.button(
+            "Refresh AdmiralBet lines",
+            help="Local Playwright scrape of Evroliga player O/U (PTS/AST/REB/3PM). Not used on Streamlit Cloud.",
+        )
+        if refresh_odds:
+            with st.spinner("Scraping AdmiralBet Evroliga player totals…"):
+                try:
+                    result = fetch_euroleague_player_totals(wait_ms=12000)
+                    ui_log(f"AdmiralBet refresh: {result.get('summary')}")
+                    st.success(f"Saved {result.get('summary', {}).get('row_count', 0)} lines.")
+                except Exception as exc:  # noqa: BLE001
+                    ui_log(f"AdmiralBet refresh failed: {exc}\n{traceback.format_exc()}", "error")
+                    st.error(
+                        f"Refresh failed ({exc}). "
+                        "Use MCP `admiralbet_fetch_euroleague_player_totals` locally, "
+                        "or keep the last `data/admiralbet_lines.json`."
+                    )
         if clear:
             st.cache_data.clear()
             st.session_state.pop("team_form", None)
@@ -480,11 +791,11 @@ def main() -> None:
     render_team_table(sorted_form)
     render_season_top3(form, season_i, team_code)
 
-    rot = sorted_form[sorted_form["min_avg"] >= 10].head(12).copy()
-    if not rot.empty and "pts_L5" in rot.columns:
-        st.markdown("**Season PTS vs last-5 PTS (rotation, >=10 min)**")
-        cmp = rot.set_index("Player")[["pts_avg", "pts_L5"]].rename(
-            columns={"pts_avg": "Season PTS", "pts_L5": "Last 5 PTS"}
+    rot = sorted_form[sorted_form["min_avg"] > 10].head(12).copy()
+    if not rot.empty and "pts_L3" in rot.columns:
+        st.markdown("**Season PTS vs last-3 PTS (rotation, >10 min)**")
+        cmp = rot.set_index("Player")[["pts_avg", "pts_L3"]].rename(
+            columns={"pts_avg": "Season PTS", "pts_L3": "Last 3 PTS"}
         )
         st.bar_chart(cmp, height=320)
 
@@ -546,29 +857,17 @@ def main() -> None:
     clubs = sorted(cross["Team"].astype(str).unique())
     st.write(f"**{player_name}** · clubs in sample: {', '.join(clubs)} · {len(cross)} games")
 
-    m1, m2, m3, m4 = st.columns(4)
-    combined = player_windows_from_logs(cross)
-    comb_row = combined[combined["window"] == "season_or_combined"].iloc[0]
-    l3_row = combined[combined["window"] == "last_3"].iloc[0]
-    m1.metric("Combined PTS", f"{comb_row['pts_avg']:.1f}")
-    m2.metric("Combined PIR/min", f"{comb_row['pir_per_min']:.2f}")
-    m3.metric("Last 3 PTS", f"{l3_row['pts_avg']:.1f}")
-    m4.metric("Last 3 PIR/min", f"{l3_row['pir_per_min']:.2f}")
-
-    left, right = st.columns(2)
-    with left:
-        render_window_bars(combined, "Combined this + last season")
-        st.dataframe(_round(combined), width="stretch", hide_index=True)
-    with right:
-        for s, chunk in cross.groupby("Season"):
-            st.markdown(f"Season **{s}** clubs={sorted(chunk['Team'].astype(str).unique())}")
-            st.dataframe(
-                _round(player_windows_from_logs(chunk)),
-                width="stretch",
-                hide_index=True,
-            )
-
-    render_game_trend(cross.tail(25))
+    this_season = cross[cross["Season"].astype(int) == int(season_i)].copy()
+    team_hint = None
+    if not this_season.empty and "Team" in this_season.columns:
+        team_hint = str(this_season["Team"].iloc[-1])
+    render_player_form_vs_baselines(
+        season_i,
+        this_season,
+        cross,
+        player_name=player_name,
+        team_hint=TEAM_LABELS.get(team_hint or "", team_hint),
+    )
 
     recent_cols = [
         c
@@ -580,17 +879,22 @@ def main() -> None:
             "HomeAway",
             "Minutes",
             "Points",
+            "Assists",
             "TotalRebounds",
             "FGM3",
             "FGA3",
             "Valuation",
             "PIR_per_min",
         ]
-        if c in cross.columns
+        if c in cross.columns or c == "Assists"
     ]
-    st.markdown("**Recent games**")
+    show = cross.copy()
+    if "Assists" not in show.columns and "Assistances" in show.columns:
+        show["Assists"] = show["Assistances"]
+    recent_cols = [c for c in recent_cols if c in show.columns]
+    st.markdown("**Recent games (raw)**")
     st.dataframe(
-        _round(cross.sort_values("date", ascending=False)[recent_cols].head(20)),
+        _round(show.sort_values("date", ascending=False)[recent_cols].head(20)),
         width="stretch",
         hide_index=True,
     )

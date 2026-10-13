@@ -9,3 +9,12 @@ Thumbs.db
 # Runtime logs only — keep CSV caches in git for fewer API calls on deploy
 data/*.log
 *.log
+
+# Cursor / local MCP (not used on Streamlit Cloud)
+.cursor/
+tools/admiralbet_mcp/
+**/admiralbet_mcp/__pycache__/
+
+# Live odds dumps (local refresh / MCP only)
+data/admiralbet_*.json
+data/_ab_*.json

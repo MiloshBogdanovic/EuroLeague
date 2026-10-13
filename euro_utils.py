@@ -129,6 +129,7 @@ def _clean_boxscore(df: pd.DataFrame) -> pd.DataFrame:
     out["Points"] = pd.to_numeric(out.get("Points"), errors="coerce")
     out["Valuation"] = pd.to_numeric(out.get("Valuation"), errors="coerce")
     out["TotalRebounds"] = pd.to_numeric(out.get("TotalRebounds"), errors="coerce")
+    out["Assists"] = pd.to_numeric(out.get("Assistances", out.get("Assists")), errors="coerce")
     out["PIR_per_min"] = out["Valuation"] / out["MinutesFloat"].replace(0, np.nan)
     return out
 
@@ -199,6 +200,10 @@ def _ensure_derived(df: pd.DataFrame) -> pd.DataFrame:
     out["Valuation"] = pd.to_numeric(out.get("Valuation"), errors="coerce")
     if "TotalRebounds" in out.columns:
         out["TotalRebounds"] = pd.to_numeric(out.get("TotalRebounds"), errors="coerce")
+    if "Assists" not in out.columns or out["Assists"].isna().all():
+        out["Assists"] = pd.to_numeric(out.get("Assistances", out.get("Assists")), errors="coerce")
+    else:
+        out["Assists"] = pd.to_numeric(out["Assists"], errors="coerce")
     out["IsStarter"] = out.get("IsStarter", 0)
     out["IsStarter"] = out["IsStarter"].fillna(0).astype(int)
     out["PIR_per_min"] = out["Valuation"] / out["MinutesFloat"].replace(0, np.nan)
@@ -949,34 +954,41 @@ def load_player_logs_across_clubs(
 
 
 def window_metrics(df: pd.DataFrame, label: str) -> dict:
-    """Aggregate PTS / REB / 3PT / PIR / PIR-per-min for a game window."""
+    """Aggregate PTS / REB / AST / 3PT / PIR / PIR-per-min for a game window."""
+    empty = {
+        "window": label,
+        "games": 0,
+        "min_avg": np.nan,
+        "pts_avg": np.nan,
+        "reb_avg": np.nan,
+        "ast_avg": np.nan,
+        "fgm3_avg": np.nan,
+        "fga3_avg": np.nan,
+        "fg3_pct": np.nan,
+        "pir_avg": np.nan,
+        "pir_per_min": np.nan,
+    }
     if df is None or df.empty:
-        return {
-            "window": label,
-            "games": 0,
-            "min_avg": np.nan,
-            "pts_avg": np.nan,
-            "reb_avg": np.nan,
-            "fgm3_avg": np.nan,
-            "fga3_avg": np.nan,
-            "fg3_pct": np.nan,
-            "pir_avg": np.nan,
-            "pir_per_min": np.nan,
-        }
+        return empty
     use = df[df["MinutesFloat"].fillna(0) > 0].copy()
     if use.empty:
-        return window_metrics(pd.DataFrame(), label)
+        return empty
     min_tot = use["MinutesFloat"].sum()
     pir_tot = use["Valuation"].sum()
     fgm = use["FGM3"].sum()
     fga = use["FGA3"].sum()
     reb = pd.to_numeric(use.get("TotalRebounds"), errors="coerce")
+    if "Assists" in use.columns:
+        ast = pd.to_numeric(use["Assists"], errors="coerce")
+    else:
+        ast = pd.to_numeric(use.get("Assistances"), errors="coerce")
     return {
         "window": label,
         "games": int(len(use)),
         "min_avg": float(use["MinutesFloat"].mean()),
         "pts_avg": float(use["Points"].mean()),
         "reb_avg": float(reb.mean()) if reb is not None else np.nan,
+        "ast_avg": float(ast.mean()) if ast is not None else np.nan,
         "fgm3_avg": float(use["FGM3"].mean()),
         "fga3_avg": float(use["FGA3"].mean()),
         "fg3_pct": float(100 * fgm / fga) if fga else np.nan,
