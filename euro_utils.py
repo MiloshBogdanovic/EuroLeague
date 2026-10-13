@@ -80,9 +80,71 @@ def load_schedule(season: int) -> pd.DataFrame:
     schedule = Schedule("E").get_schedule(season)
     schedule = schedule.copy()
     schedule["game"] = schedule["game"].astype(int)
+    schedule["gameday"] = pd.to_numeric(schedule["gameday"], errors="coerce").astype("Int64")
     schedule["played_bool"] = schedule["played"].astype(str).str.lower().eq("true")
     schedule["date_parsed"] = pd.to_datetime(schedule["date"], format="%b %d, %Y", errors="coerce")
     return schedule
+
+
+def current_gameday(schedule: pd.DataFrame) -> int | None:
+    """Smallest gameday with unplayed games; otherwise the season's last gameday."""
+    if schedule is None or schedule.empty or "gameday" not in schedule.columns:
+        return None
+    days = schedule["gameday"].dropna()
+    if days.empty:
+        return None
+    upcoming = schedule.loc[~schedule["played_bool"], "gameday"].dropna()
+    if not upcoming.empty:
+        return int(upcoming.min())
+    return int(days.max())
+
+
+def schedule_for_gameday(schedule: pd.DataFrame, gameday: int) -> pd.DataFrame:
+    """All fixtures for one regular-season gameday, sorted by tip-off."""
+    if schedule is None or schedule.empty:
+        return pd.DataFrame()
+    out = schedule[schedule["gameday"] == int(gameday)].copy()
+    if out.empty:
+        return out
+    if "startime" in out.columns:
+        out = out.sort_values(["date_parsed", "startime"], kind="mergesort")
+    else:
+        out = out.sort_values("date_parsed", kind="mergesort")
+    return out.reset_index(drop=True)
+
+
+def load_round_game_reports(season: int, gameday: int) -> pd.DataFrame:
+    """
+    Official game reports for one gameday (scores when available).
+    Empty for future rounds that the API has not published yet.
+    """
+    from euroleague_api.game_stats import GameStats
+
+    try:
+        reports = GameStats("E").get_game_report_round(int(season), int(gameday))
+    except Exception:
+        return pd.DataFrame()
+    if reports is None or reports.empty:
+        return pd.DataFrame()
+    out = reports.copy()
+    rename = {
+        "local.club.code": "homecode",
+        "road.club.code": "awaycode",
+        "local.club.abbreviatedName": "home_short",
+        "road.club.abbreviatedName": "away_short",
+        "local.club.name": "hometeam",
+        "road.club.name": "awayteam",
+        "local.score": "home_score",
+        "road.score": "away_score",
+    }
+    for src, dst in rename.items():
+        if src in out.columns:
+            out[dst] = out[src]
+    if "played" in out.columns:
+        out["played_bool"] = out["played"].astype(str).str.lower().isin({"true", "1", "yes"})
+    else:
+        out["played_bool"] = out.get("home_score").notna() & out.get("away_score").notna()
+    return out
 
 
 def next_rival(schedule: pd.DataFrame, team: str) -> tuple[str | None, pd.Series | None]:

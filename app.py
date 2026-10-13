@@ -28,10 +28,12 @@ from euro_admiralbet import (
 from euro_utils import (
     DATA_DIR,
     annotate_vs_specific_defenders,
+    current_gameday,
     filter_player_vs_opponent,
     likely_positional_defenders,
     load_h2h_pair_logs,
     load_player_logs_across_clubs,
+    load_round_game_reports,
     load_schedule,
     load_team_season_logs,
     next_rival,
@@ -39,6 +41,7 @@ from euro_utils import (
     player_clubs_in_season,
     player_position,
     player_windows_from_logs,
+    schedule_for_gameday,
     team_player_form_table,
 )
 
@@ -158,6 +161,118 @@ def cached_h2h_pair(seasons: tuple[int, ...], team_a: str, team_b: str) -> tuple
 def cached_player_cross(season: int, player_id: str) -> pd.DataFrame:
     pid = normalize_player_id(player_id)
     return load_player_logs_across_clubs([season, season - 1], pid, quiet=True)
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def cached_schedule(season: int) -> pd.DataFrame:
+    return load_schedule(season)
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def cached_round_reports(season: int, gameday: int) -> pd.DataFrame:
+    return load_round_game_reports(season, gameday)
+
+
+def render_round_board(season: int, focus_team: str | None = None) -> None:
+    """Current gameday fixtures + latest results at the top of the page."""
+    try:
+        sched = cached_schedule(int(season))
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Could not load schedule for round board: {exc}")
+        return
+
+    gday = current_gameday(sched)
+    if gday is None:
+        st.info("No gamedays found in schedule.")
+        return
+
+    focus = (focus_team or "").upper() or None
+    round_games = schedule_for_gameday(sched, int(gday))
+    upcoming = round_games[~round_games["played_bool"]].copy() if not round_games.empty else pd.DataFrame()
+    played_now = round_games[round_games["played_bool"]].copy() if not round_games.empty else pd.DataFrame()
+
+    results_gday = int(gday)
+    results = pd.DataFrame()
+    if not played_now.empty:
+        try:
+            results = cached_round_reports(int(season), results_gday)
+        except Exception:  # noqa: BLE001
+            results = pd.DataFrame()
+        if results.empty:
+            # Fall back to schedule rows without scores
+            results = played_now
+    else:
+        prev = int(gday) - 1
+        while prev >= 1:
+            prev_games = schedule_for_gameday(sched, prev)
+            if not prev_games.empty and prev_games["played_bool"].any():
+                results_gday = prev
+                try:
+                    results = cached_round_reports(int(season), results_gday)
+                except Exception:  # noqa: BLE001
+                    results = pd.DataFrame()
+                if results.empty:
+                    results = prev_games[prev_games["played_bool"]].copy()
+                break
+            prev -= 1
+
+    st.subheader(f"Round {gday}")
+    st.caption("Current EuroLeague gameday — upcoming tip-offs and latest final scores.")
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown(f"**Upcoming · Round {gday}**")
+        if upcoming.empty:
+            st.caption("No remaining fixtures in this round.")
+        else:
+            rows = []
+            for _, g in upcoming.iterrows():
+                home = str(g.get("homecode", "")).upper()
+                away = str(g.get("awaycode", "")).upper()
+                tip = f"{g.get('date', '')} {g.get('startime', '')}".strip()
+                mark = " ★" if focus and focus in {home, away} else ""
+                rows.append(
+                    {
+                        "When": tip,
+                        "Home": f"{home} · {_label(home).split(' - ', 1)[-1]}{mark if focus == home else ''}",
+                        "Away": f"{away} · {_label(away).split(' - ', 1)[-1]}{mark if focus == away else ''}",
+                        "Game": int(g["game"]) if pd.notna(g.get("game")) else "",
+                    }
+                )
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+    with right:
+        label = f"**Results · Round {results_gday}**"
+        if results_gday != int(gday):
+            label += " _(previous)_"
+        st.markdown(label)
+        if results is None or results.empty:
+            st.caption("No results available yet.")
+        else:
+            rows = []
+            for _, g in results.iterrows():
+                home = str(g.get("homecode", g.get("local.club.code", ""))).upper()
+                away = str(g.get("awaycode", g.get("road.club.code", ""))).upper()
+                hs = g.get("home_score", g.get("local.score"))
+                as_ = g.get("away_score", g.get("road.score"))
+                if pd.isna(hs) or pd.isna(as_):
+                    score = "—"
+                else:
+                    score = f"{int(hs)}–{int(as_)}"
+                home_name = g.get("home_short") or TEAM_LABELS.get(home, home)
+                away_name = g.get("away_short") or TEAM_LABELS.get(away, away)
+                mark_h = " ★" if focus == home else ""
+                mark_a = " ★" if focus == away else ""
+                rows.append(
+                    {
+                        "Home": f"{home} · {home_name}{mark_h}",
+                        "Score": score,
+                        "Away": f"{away} · {away_name}{mark_a}",
+                    }
+                )
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+    st.divider()
 
 
 def render_team_table(form: pd.DataFrame) -> None:
@@ -728,6 +843,13 @@ def main() -> None:
             st.session_state["ui_logs"] = []
             ui_log("Streamlit cache + session player/team state cleared")
             st.success("Cache cleared.")
+
+    focus_team = None
+    if st.session_state.get("loaded_key"):
+        focus_team = st.session_state["loaded_key"][1]
+    elif team:
+        focus_team = team
+    render_round_board(int(season), focus_team=focus_team)
 
     if load or (
         "team_form" in st.session_state and st.session_state.get("loaded_key") == (int(season), team)
