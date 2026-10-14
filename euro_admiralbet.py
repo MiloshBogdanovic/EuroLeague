@@ -11,6 +11,7 @@ import os
 import re
 import time
 import unicodedata
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -33,16 +34,31 @@ def playwright_ready() -> tuple[bool, str]:
         return False, "Playwright not installed. Locally: pip install playwright && playwright install chromium"
     return True, ""
 
+
+def offer_date_window(now: datetime | None = None) -> tuple[str, str]:
+    """AdmiralBet offer API window: from *today* (UTC) through +5 years."""
+    now = now or datetime.now(timezone.utc)
+    date_from = now.strftime("%Y-%m-%dT%H:%M:%S.000")
+    date_to = (now + timedelta(days=365 * 5)).strftime("%Y-%m-%dT%H:%M:%S.000")
+    return date_from, date_to
+
+
 LINES_PATH = DATA_DIR / "admiralbet_lines.json"
 CAPTURE_PATH = DATA_DIR / "admiralbet_capture.json"
 
 # AdmiralBet market label -> boxscore column used in the app
+# UI copy may be title-case or lowercase depending on layout.
 MARKET_TABS: list[tuple[str, str]] = [
     ("Ukupno Poena", "Points"),
+    ("Ukupno poena", "Points"),
     ("Ukupno Asistencija", "Assists"),
+    ("Ukupno asistencija", "Assists"),
     ("Ukupno Skokova", "TotalRebounds"),
+    ("Ukupno skokova", "TotalRebounds"),
     ("Ukupno Pogodjenih Trojki", "FGM3"),
     ("Ukupno Pogođenih Trojki", "FGM3"),
+    ("Ukupno pogodjenih trojki", "FGM3"),
+    ("Ukupno pogođenih trojki", "FGM3"),
 ]
 
 STAT_LABELS = {
@@ -70,60 +86,126 @@ OUTER_URL = (
     "&competitionId=123-1416-25158"
 )
 
+# Time-filter chips on the prematch board (Serbian UI).
+TIME_FILTERS_TODAY_FIRST = ("DANAS", "SVE", "12h", "6h", "3h")
+
+
+def today_date_chips(now: datetime | None = None) -> list[str]:
+    """AdmiralBet day chips look like '14.10.' — build variants for today."""
+    now = now or datetime.now()
+    d, m = now.day, now.month
+    return [
+        f"{d:02d}.{m:02d}.",
+        f"{d}.{m}.",
+        f"{d:02d}.{m}.",
+        f"{d}.{m:02d}.",
+    ]
+
+# marketKey may be a single stat, or "ALL" to emit PTS/AST/REB column triples.
 DOM_EXTRACT_JS = """(marketKey) => {
   const text = document.body ? document.body.innerText : '';
   const lines = text.split(/\\n/).map(s => s.trim()).filter(Boolean);
-  const start = lines.findIndex(l => l === 'EVROLIGA' || l === 'Igrači ukupno');
-  const slice = start >= 0 ? lines.slice(start) : lines;
+  const nameRe = /^[A-Za-zČĆŠŽĐčćšžđ][A-Za-zČĆŠŽĐčćšžđ.'\\-]*(?:\\s+[A-Za-zČĆŠŽĐčćšžđ.'\\-]+){0,3}$/;
+  const tipRe = /^(?:pon|uto|sre|čet|cet|pet|sub|ned|ponedeljak|utorak|sreda|cetvrtak|četvrtak|petak|subota|nedelja)\\s*,?\\s*\\d{1,2}\\.\\s*\\d{1,2}\\.(?:\\s*\\d{4}\\.?)?\\s*\\d{1,2}:\\d{2}/i;
+  const legacyDateRe = /(?:pon|uto|sre|čet|cet|pet|sub|ned)?\\s*,?\\s*\\d{1,2}\\.\\s*\\d{1,2}\\./i;
   const skip = new Set([
     'Evroliga','EVROLIGA','Igrači ukupno','IGRAČI UKUPNO','Košarka igrači',
-    '+','-','manje','vise','Ukupno Poena','Ukupno Asistencija','Ukupno Skokova',
-    'Ukupno Pogodjenih Trojki','Ukupno Pogođenih Trojki','Select statistic',
-    'OBIČAN','Uplata','BRZI TIKET'
+    '+','-','manje','vise','Ukupno Poena','Ukupno poena','Ukupno Asistencija',
+    'Ukupno asistencija','Ukupno Skokova','Ukupno skokova','Select statistic',
+    'OBIČAN','Uplata','BRZI TIKET','DANAS','SVE','3h','6h','12h','Manje','Vise'
   ]);
-  const nameRe = /^[A-Za-zČĆŠŽĐčćšžđ][A-Za-zČĆŠŽĐčćšžđ.'\\-]*(?:\\s+[A-Za-zČĆŠŽĐčćšžđ.'\\-]+){1,3}$/;
+  // Multi-column board order on Igrači ukupno
+  const colMarkets = ['Points', 'Assists', 'TotalRebounds'];
+  const wantAll = !marketKey || marketKey === 'ALL' || marketKey === 'Points';
   const out = [];
-  for (let i = 0; i < slice.length - 4; i++) {
-    const name = slice[i];
-    const team = slice[i + 1];
-    const date = slice[i + 2] || '';
-    if (!nameRe.test(name)) continue;
-    if (skip.has(name) || skip.has(team)) continue;
-    if (!/\\d{1,2}\\.\\s*\\d{1,2}\\./.test(date) && !/\\d{4,}/.test(date)) continue;
-    const nums = [];
-    for (let j = i + 3; j < Math.min(i + 10, slice.length); j++) {
-      const tok = slice[j];
-      if (tok === 'Evroliga' || tok === '+') break;
-      if (tok === '-') { nums.push(null); continue; }
-      if (/^\\d+(?:\\.\\d+)?$/.test(tok)) nums.push(Number(tok));
-      else break;
-    }
-    if (nums.filter(n => n != null).length < 2) continue;
-    let under = null, line = null, over = null;
-    if (nums.length >= 3 && nums[1] === nums[2]) {
-      under = nums[0]; line = nums[1]; over = nums[3] != null ? nums[3] : nums[0];
-    } else if (nums.length >= 3) {
-      under = nums[0]; line = nums[1]; over = nums[2];
-    } else {
-      line = nums.find(n => n != null && String(n).includes('.'));
-    }
-    if (line == null) continue;
-    const idm = String(date).match(/(\\d{1,2}):(\\d{2})(\\d{4,})$/);
+
+  function pushTriple(name, team, eventId, tip, under, line, over, market) {
+    if (line == null) return;
     out.push({
       player: name,
       team,
-      event_id: idm ? idm[3] : null,
+      event_id: eventId,
       under_odds: under,
       line,
       over_odds: over,
-      market: marketKey || 'Points',
-      source: 'dom'
+      market,
+      source: 'dom',
+      tip_text: tip
     });
   }
+
+  function parseTriple(nums, offset) {
+    const a = nums[offset], b = nums[offset + 1], c = nums[offset + 2];
+    if (a == null && b == null && c == null) return null;
+    // duplicated line value: under, line, line, over
+    if (b != null && c != null && b === c && nums[offset + 3] != null) {
+      return { under: a, line: b, over: nums[offset + 3], width: 4 };
+    }
+    if (b != null) return { under: a, line: b, over: c, width: 3 };
+    return null;
+  }
+
+  // Layout A: tip → event_id → player → team → up to 3 market triples (PTS/AST/REB)
+  for (let i = 0; i < lines.length - 5; i++) {
+    const tip = lines[i];
+    if (!tipRe.test(tip)) continue;
+    let j = i + 1;
+    let eventId = null;
+    if (/^\\d{4,}$/.test(lines[j] || '')) { eventId = lines[j]; j += 1; }
+    const name = lines[j];
+    const team = lines[j + 1];
+    if (!nameRe.test(name || '') || skip.has(name) || skip.has(team)) continue;
+    const toks = [];
+    for (let k = j + 2; k < Math.min(j + 16, lines.length); k++) {
+      const tok = lines[k];
+      if (tipRe.test(tok) || tok === '+' || /^\\d{4,}$/.test(tok)) break;
+      if (tok === 'manje' || tok === 'vise' || tok === 'Manje' || tok === 'Vise') continue;
+      if (tok === '-') { toks.push(null); continue; }
+      if (/^\\d+(?:\\.\\d+)?$/.test(tok)) toks.push(Number(tok));
+      else break;
+    }
+    if (wantAll) {
+      let offset = 0;
+      for (const market of colMarkets) {
+        const t = parseTriple(toks, offset);
+        if (!t) { offset += 3; continue; }
+        pushTriple(name, team, eventId, tip, t.under, t.line, t.over, market);
+        offset += t.width;
+      }
+    } else {
+      const t = parseTriple(toks, 0);
+      if (t) pushTriple(name, team, eventId, tip, t.under, t.line, t.over, marketKey);
+    }
+  }
+
+  // Layout B (legacy single-market list)
+  if (out.length < 3) {
+    for (let i = 0; i < lines.length - 4; i++) {
+      const name = lines[i];
+      const team = lines[i + 1];
+      const date = lines[i + 2] || '';
+      if (!nameRe.test(name) || skip.has(name) || skip.has(team)) continue;
+      if (!legacyDateRe.test(date) && !/\\d{4,}/.test(date)) continue;
+      if (tipRe.test(name)) continue;
+      const nums = [];
+      for (let j = i + 3; j < Math.min(i + 10, lines.length); j++) {
+        const tok = lines[j];
+        if (tok === 'Evroliga' || tok === 'EVROLIGA' || tok === '+') break;
+        if (tok === '-') { nums.push(null); continue; }
+        if (/^\\d+(?:\\.\\d+)?$/.test(tok)) nums.push(Number(tok));
+        else break;
+      }
+      const t = parseTriple(nums, 0);
+      if (!t) continue;
+      const idm = String(date).match(/(\\d{1,2}):(\\d{2})(\\d{4,})$/);
+      pushTriple(name, team, idm ? idm[3] : null, date, t.under, t.line, t.over, marketKey || 'Points');
+    }
+  }
+
   const seen = new Set();
   const dedup = [];
   for (const r of out) {
-    const k = r.player + '|' + r.team;
+    const k = r.player + '|' + r.team + '|' + r.market;
     if (seen.has(k)) continue;
     seen.add(k);
     dedup.push(r);
@@ -150,7 +232,6 @@ def save_lines_payload(rows: list[dict[str, Any]], *, source: str = "fetch") -> 
     clean: list[dict[str, Any]] = []
     for r in rows:
         market = str(r.get("market") or "Points")
-        # Map Serbian labels if still present
         for label, key in MARKET_TABS:
             if market == label:
                 market = key
@@ -166,6 +247,7 @@ def save_lines_payload(rows: list[dict[str, Any]], *, source: str = "fetch") -> 
             "over_odds": r.get("over_odds"),
             "market": market,
             "source": r.get("source") or source,
+            "tip_text": r.get("tip_text"),
         }
         if not row["player"] or row["line"] is None:
             continue
@@ -179,15 +261,17 @@ def save_lines_payload(rows: list[dict[str, Any]], *, source: str = "fetch") -> 
             )
         raise RuntimeError("Scrape returned 0 player lines and no previous file exists.")
 
+    date_from, date_to = offer_date_window()
     payload = {
-        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "offer_date_from": date_from,
+        "offer_date_to": date_to,
         "competition": "Evroliga",
         "source": source,
         "summary": {"row_count": len(clean), "by_market": by_market},
         "lines": clean,
     }
     LINES_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    # Keep capture file in sync for MCP / debug
     CAPTURE_PATH.write_text(
         json.dumps(
             {
@@ -241,7 +325,6 @@ def match_player_lines(
 
     candidates = [r for r in lines if _norm_name(r.get("player", "")) == target]
     if not candidates:
-        # last-token / contains fallback
         parts = target.split()
         last = parts[-1] if parts else target
         candidates = [
@@ -268,7 +351,6 @@ def match_player_lines(
                 break
         if market not in STAT_LABELS:
             continue
-        # keep first (or prefer one with odds)
         prev = by_stat.get(market)
         if prev is None or (prev.get("line") is None and r.get("line") is not None):
             by_stat[market] = r
@@ -287,22 +369,112 @@ async def _accept_cookies(page) -> None:
             continue
 
 
-async def _click_market(target, label: str) -> bool:
+async def _click_label(target, label: str, *, exact: bool = True) -> bool:
     try:
-        loc = target.get_by_text(label, exact=True)
+        loc = target.get_by_text(label, exact=exact)
         if await loc.count() > 0:
             await loc.first.click(timeout=2500)
             return True
     except Exception:
         pass
-    try:
-        loc = target.get_by_text(label, exact=False)
-        if await loc.count() > 0:
-            await loc.first.click(timeout=2500)
-            return True
-    except Exception:
-        pass
+    if exact:
+        return await _click_label(target, label, exact=False)
     return False
+
+
+async def _click_market(target, label: str) -> bool:
+    return await _click_label(target, label, exact=True)
+
+
+async def _apply_time_filter(target, label: str) -> bool:
+    """Click DANAS / SVE / Nh chips so the board uses today's window (not a stale filter)."""
+    return await _click_label(target, label, exact=True)
+
+
+async def _scroll_board(target, page, n: int = 8) -> None:
+    for _ in range(n):
+        try:
+            await target.mouse.wheel(0, 2800)
+        except Exception:
+            await page.mouse.wheel(0, 2800)
+        await page.wait_for_timeout(280)
+
+
+async def _scrape_markets(target, page, tabs: list[tuple[str, str]] | None = None) -> list[dict[str, Any]]:
+    """Parse the multi-column PTS/AST/REB board (and optionally a 3PM tab)."""
+    _ = tabs
+    await _scroll_board(target, page, n=12)
+    # One pass reads PTS + AST + REB columns from the Igrači ukupno grid.
+    all_rows: list[dict[str, Any]] = await target.evaluate(DOM_EXTRACT_JS, "ALL")
+
+    # 3PM is often a separate tab when present.
+    for label in ("Ukupno Pogodjenih Trojki", "Ukupno pogodjenih trojki", "Ukupno Pogođenih Trojki"):
+        if await _click_market(target, label):
+            await page.wait_for_timeout(1600)
+            await _scroll_board(target, page, n=8)
+            threes = await target.evaluate(DOM_EXTRACT_JS, "FGM3")
+            pts = {
+                (r.get("player"), r.get("team")): r.get("line")
+                for r in all_rows
+                if r.get("market") == "Points"
+            }
+            same_as_pts = sum(
+                1
+                for r in threes
+                if pts.get((r.get("player"), r.get("team"))) == r.get("line")
+            )
+            # If almost every "3PM" line equals PTS, the tab did not switch — skip.
+            if threes and same_as_pts < max(3, int(0.8 * len(threes))):
+                all_rows.extend(threes)
+            break
+    return all_rows
+
+
+def _tip_is_today(tip_text: str, now: datetime | None = None) -> bool:
+    """True if tip_text contains today's day/month (Serbian board format)."""
+    now = now or datetime.now()
+    text = str(tip_text or "")
+    patterns = (
+        rf"\b{now.day}\.\s*{now.month}\.",
+        rf"\b{now.day:02d}\.\s*{now.month:02d}\.",
+        rf"\b{now.day}\.\s*{now.month:02d}\.",
+        rf"\b{now.day:02d}\.\s*{now.month}\.",
+    )
+    return any(re.search(p, text) for p in patterns)
+
+
+async def _open_evroliga_player_board(target, page) -> str | None:
+    """
+    Stay on the hash-routed Evroliga player board.
+    Prefer SVE (DANAS alone can kick the SPA back to general sports).
+    Then try today's day chip (e.g. 14.10.) if present.
+    """
+    used = None
+    if await _apply_time_filter(target, "SVE"):
+        used = "SVE"
+        await page.wait_for_timeout(1200)
+
+    for chip in today_date_chips():
+        if await _apply_time_filter(target, chip):
+            used = chip
+            await page.wait_for_timeout(1000)
+            break
+
+    for label in ("Ukupno Poena", "Ukupno poena"):
+        if await _click_market(target, label):
+            await page.wait_for_timeout(1000)
+            break
+    return used
+
+
+async def _goto_player_props(page):
+    """Open Evroliga Igrači ukupno — direct SPA hash is most reliable in headless."""
+    await page.goto(DEFAULT_SPA_URL, wait_until="domcontentloaded", timeout=60000)
+    await _accept_cookies(page)
+    await page.wait_for_timeout(4000)
+    target = page.frame(name="sportIframe") or page
+    used = await _open_evroliga_player_board(target, page)
+    return target, used
 
 
 async def fetch_euroleague_player_totals_async(
@@ -310,7 +482,10 @@ async def fetch_euroleague_player_totals_async(
     *,
     markets: list[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """Playwright scrape of Evroliga player O/U tabs; writes admiralbet_lines.json."""
+    """Playwright scrape of Evroliga player O/U tabs; writes admiralbet_lines.json.
+
+    Uses *today's* offer window and clicks DANAS first (then SVE if empty).
+    """
     ok, reason = playwright_ready()
     if not ok:
         return {
@@ -331,8 +506,9 @@ async def fetch_euroleague_player_totals_async(
         }
 
     tabs = markets or MARKET_TABS
+    date_from, date_to = offer_date_window()
     all_rows: list[dict[str, Any]] = []
-    seen_keys: set[str] = set()
+    used_filter = None
 
     async with async_playwright() as p:
         try:
@@ -357,58 +533,61 @@ async def fetch_euroleague_player_totals_async(
             ),
         )
         page = await context.new_page()
-        await page.goto(OUTER_URL, wait_until="domcontentloaded", timeout=60000)
-        await _accept_cookies(page)
-        await page.wait_for_timeout(1500)
-        target = page.frame(name="sportIframe") or page
-        if target is not page:
-            try:
-                await target.wait_for_load_state("domcontentloaded", timeout=15000)
-            except Exception:
-                pass
-            await target.evaluate(
-                """() => {
-                  const h = '#/betting/prematch?language=sr'
-                    + '&sport=' + encodeURIComponent('Košarka_igrači')
-                    + '&region=' + encodeURIComponent('Igrači_ukupno')
-                    + '&competition=Evroliga'
-                    + '&competitionId=123-1416-25158';
-                  location.hash = h;
-                }"""
-            )
-            await page.wait_for_timeout(2500)
-        else:
-            await page.goto(DEFAULT_SPA_URL, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(2000)
 
-        # Warm-up: wait for any prop list
-        deadline = time.time() + max(wait_ms, 8000) / 1000
+        # Soft-patch fetch dates if the SPA builds offer URLs with dateFrom/dateTo.
+        await page.add_init_script(
+            f"""() => {{
+              const dateFrom = {json.dumps(date_from)};
+              const dateTo = {json.dumps(date_to)};
+              const orig = window.fetch.bind(window);
+              window.fetch = (input, init) => {{
+                try {{
+                  let url = typeof input === 'string' ? input : (input && input.url) || '';
+                  if (url.includes('dateFrom=') || url.includes('getWebEventsSelections')) {{
+                    url = url
+                      .replace(/dateFrom=[^&]+/g, 'dateFrom=' + encodeURIComponent(dateFrom))
+                      .replace(/dateTo=[^&]+/g, 'dateTo=' + encodeURIComponent(dateTo));
+                    if (typeof input === 'string') input = url;
+                    else if (input && typeof Request !== 'undefined' && input instanceof Request) {{
+                      input = new Request(url, input);
+                    }}
+                  }}
+                }} catch (e) {{}}
+                return orig(input, init);
+              }};
+            }}"""
+        )
+
+        target, used_filter = await _goto_player_props(page)
+
+        # Wait until player odds rows appear (tip→id→player layout or legacy).
+        deadline = time.time() + max(wait_ms, 10000) / 1000
         while time.time() < deadline:
             try:
                 snip = await target.inner_text("body")
             except Exception:
                 snip = ""
-            if "Ukupno Poena" in snip or "Shields" in snip or re.search(r"\b\d+\.5\b", snip):
+            if "Ukupno poena" in snip.lower() or re.search(r"\b\d+\.5\b", snip):
                 break
             await page.wait_for_timeout(400)
 
-        for label, key in tabs:
-            if key in seen_keys and label != "Ukupno Pogođenih Trojki":
-                # allow alt spelling only if FGM3 not collected yet
-                if key in seen_keys:
-                    continue
-            clicked = await _click_market(target, label)
-            await page.wait_for_timeout(1600 if clicked else 400)
-            for _ in range(6):
-                try:
-                    await target.mouse.wheel(0, 2600)
-                except Exception:
-                    await page.mouse.wheel(0, 2600)
-                await page.wait_for_timeout(250)
-            rows = await target.evaluate(DOM_EXTRACT_JS, key)
-            if len(rows) >= 5:
-                seen_keys.add(key)
-                all_rows.extend(rows)
+        await _scroll_board(target, page, n=4)
+        probe = await target.evaluate(DOM_EXTRACT_JS, "Points")
+        if len(probe) < 3:
+            # One more widen attempt
+            await _apply_time_filter(target, "SVE")
+            await page.wait_for_timeout(1200)
+            used_filter = used_filter or "SVE"
+            await _scroll_board(target, page, n=4)
+            probe = await target.evaluate(DOM_EXTRACT_JS, "Points")
+
+        if len(probe) >= 3:
+            all_rows = await _scrape_markets(target, page, tabs)
+            # Prefer rows tipping today when the board also includes later days.
+            today_rows = [r for r in all_rows if _tip_is_today(str(r.get("tip_text") or ""))]
+            if len(today_rows) >= 3:
+                all_rows = today_rows
+                used_filter = (used_filter or "") + "+today"
 
         await browser.close()
 
@@ -419,14 +598,23 @@ async def fetch_euroleague_player_totals_async(
     if not all_rows:
         return {
             "saved_to": None,
-            "error": "Scrape returned 0 rows (SPA/hash may need a headed browser). Previous file kept if present.",
+            "error": (
+                "Scrape returned 0 rows for today's window "
+                f"(dateFrom={date_from}). Previous file kept if present."
+            ),
+            "offer_date_from": date_from,
+            "offer_date_to": date_to,
+            "time_filter": used_filter,
             "summary": {"row_count": 0, "by_market": {}},
             "lines": [],
         }
     path = save_lines_payload(all_rows, source="playwright")
     return {
         "saved_to": str(path),
-        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "offer_date_from": date_from,
+        "offer_date_to": date_to,
+        "time_filter": used_filter,
         "summary": {"row_count": len(all_rows), "by_market": by_market},
         "lines": all_rows,
     }
@@ -441,6 +629,5 @@ def fetch_euroleague_player_totals(wait_ms: int = 12000) -> dict[str, Any]:
     except RuntimeError:
         loop = None
     if loop and loop.is_running():
-        # Nested loop (e.g. MCP) — caller should use async variant
         raise RuntimeError("Event loop running; use fetch_euroleague_player_totals_async")
     return asyncio.run(fetch_euroleague_player_totals_async(wait_ms=wait_ms))
