@@ -884,6 +884,26 @@ Move it down (e.g. 5%) → synth Under gets **longer**.
     over_col = "over_gap (B365−Adm)"
     under_col = "under_gap (AdmU−synthU)"
 
+    # Guard: Bet365 board teams missing from Admiral snapshot (wrong gameday on Cloud)
+    if int(summ.get("exact_half_line_matches") or 0) == 0 and int(summ.get("close_line_matches") or 0) == 0:
+        adm_teams = sorted(
+            {
+                str(r.get("team") or "")
+                for r in (load_admiralbet_lines().get("lines") or [])
+                if r.get("market") == "Points" and r.get("team")
+            }
+        )
+        b365_hints = sorted(
+            {str(p.get("team_hint") or "") for p in players if p.get("team_hint")}
+        )
+        st.warning(
+            "No player/line overlaps between the Bet365 board and "
+            f"`admiralbet_lines.json` (fetched {load_admiralbet_lines().get('fetched_at') or '—'}). "
+            "Refresh/commit the Admiral snapshot for the same gameday as the Bet365 screenshots. "
+            f"Bet365 teams: {', '.join(b365_hints) or '—'}. "
+            f"Admiral PTS teams: {', '.join(adm_teams) or '—'}."
+        )
+
     def _filter_game(df: pd.DataFrame) -> pd.DataFrame:
         if pick == "All games" or df.empty or "event" not in df.columns:
             return df
