@@ -31,6 +31,8 @@ from euro_market_compare import (
     DEFAULT_CLOSE_LINE_TOL,
     MASSIVE_UNDERCUT,
     board_player_summary,
+    build_comparison,
+    comparison_cache_is_fresh,
     comparison_table_df,
     decorate_flags,
     load_bet365_board,
@@ -851,21 +853,26 @@ Move it down (e.g. 5%) → synth Under gets **longer**.
 
     margin = margin_pct / 100.0
     cmp_payload = None
-    need_rebuild = rebuild or not COMPARE_PATH.exists()
-    if not need_rebuild:
-        cmp_payload = load_comparison()
-        if cmp_payload and (
-            abs(float(cmp_payload.get("b365_margin_assumed") or 0) - margin) > 1e-6
-            or abs(float(cmp_payload.get("close_line_tol") or 0) - close_tol) > 1e-6
-        ):
-            need_rebuild = True
+    # Cloud can keep a stale gitignored market_value_compare.json across deploys.
+    # Always rebuild unless an explicit cache is proven fresh vs live sources.
+    cached = None if rebuild else load_comparison()
+    need_rebuild = rebuild or not comparison_cache_is_fresh(
+        cached, margin=margin, close_tol=close_tol
+    )
     if need_rebuild:
         try:
             cmp_payload = save_comparison(margin=margin, close_tol=close_tol)
+            if cmp_payload.get("save_error"):
+                st.caption(f"Compare built in-memory (could not write cache: {cmp_payload['save_error']})")
         except Exception as exc:  # noqa: BLE001
             ui_log(f"Market compare failed: {exc}\n{traceback.format_exc()}", "error")
             st.error(f"Compare failed: {exc}")
-            cmp_payload = None
+            try:
+                cmp_payload = build_comparison(margin=margin, close_tol=close_tol)
+            except Exception:  # noqa: BLE001
+                cmp_payload = None
+    else:
+        cmp_payload = cached
 
     event_opts = ["All games"] + [g.get("event") or f"Game {i+1}" for i, g in enumerate(games)]
     pick = st.selectbox("Filter by game", options=event_opts, key="market_cut_game")
@@ -884,12 +891,24 @@ Move it down (e.g. 5%) → synth Under gets **longer**.
     over_col = "over_gap (B365−Adm)"
     under_col = "under_gap (AdmU−synthU)"
 
-    # Guard: Bet365 board teams missing from Admiral snapshot (wrong gameday on Cloud)
-    if int(summ.get("exact_half_line_matches") or 0) == 0 and int(summ.get("close_line_matches") or 0) == 0:
+    st.caption(
+        f"Sources → Bet365 players **{summ.get('input_players', 0)}** · "
+        f"exact **{summ.get('exact_half_line_matches', 0)}** · "
+        f"close **{summ.get('close_line_matches', 0)}** · "
+        f"far **{summ.get('far_nearest', 0)}** · "
+        f"Admiral fetched `{cmp_payload.get('admiral_fetched_at') or '—'}`"
+    )
+    # Guard: zero overlaps after rebuild (wrong gameday or name mismatch)
+    if (
+        int(summ.get("exact_half_line_matches") or 0) == 0
+        and int(summ.get("close_line_matches") or 0) == 0
+        and int(summ.get("far_nearest") or 0) == 0
+    ):
+        adm_meta = load_admiralbet_lines()
         adm_teams = sorted(
             {
                 str(r.get("team") or "")
-                for r in (load_admiralbet_lines().get("lines") or [])
+                for r in (adm_meta.get("lines") or [])
                 if r.get("market") == "Points" and r.get("team")
             }
         )
@@ -897,9 +916,8 @@ Move it down (e.g. 5%) → synth Under gets **longer**.
             {str(p.get("team_hint") or "") for p in players if p.get("team_hint")}
         )
         st.warning(
-            "No player/line overlaps between the Bet365 board and "
-            f"`admiralbet_lines.json` (fetched {load_admiralbet_lines().get('fetched_at') or '—'}). "
-            "Refresh/commit the Admiral snapshot for the same gameday as the Bet365 screenshots. "
+            "No player overlaps after rebuild. "
+            f"Admiral fetched {adm_meta.get('fetched_at') or '—'}. "
             f"Bet365 teams: {', '.join(b365_hints) or '—'}. "
             f"Admiral PTS teams: {', '.join(adm_teams) or '—'}."
         )

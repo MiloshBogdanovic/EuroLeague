@@ -356,12 +356,19 @@ def build_comparison(
     )
 
     players_in = board_player_summary(board)
+    board_mtime = None
+    try:
+        if BET365_BOARD_PATH.exists():
+            board_mtime = BET365_BOARD_PATH.stat().st_mtime
+    except OSError:
+        board_mtime = None
     payload = {
         "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "bet365_events": events,
         "bet365_event": ", ".join(events) if events else board.get("event"),
         "bet365_tip_off": board.get("tip_off"),
         "bet365_source": board.get("source"),
+        "bet365_board_mtime": board_mtime,
         "admiral_fetched_at": adm.get("fetched_at"),
         "b365_margin_assumed": margin,
         "close_line_tol": close_tol,
@@ -397,10 +404,16 @@ def save_comparison(
     margin: float = DEFAULT_B365_MARGIN,
     close_tol: float = DEFAULT_CLOSE_LINE_TOL,
 ) -> dict[str, Any]:
+    """Build from live JSON sources. Best-effort write (Cloud FS may be read-only)."""
     path = path or COMPARE_PATH
     payload = build_comparison(margin=margin, close_tol=close_tol)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        payload["saved_path"] = str(path)
+    except OSError as exc:
+        payload["saved_path"] = None
+        payload["save_error"] = str(exc)
     return payload
 
 
@@ -408,7 +421,45 @@ def load_comparison(path: Path | None = None) -> dict[str, Any] | None:
     path = path or COMPARE_PATH
     if not path.exists():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def comparison_cache_is_fresh(
+    payload: dict[str, Any] | None,
+    *,
+    margin: float,
+    close_tol: float,
+) -> bool:
+    """True only if cache matches current slider + source file timestamps."""
+    if not payload:
+        return False
+    if abs(float(payload.get("b365_margin_assumed") or 0) - margin) > 1e-6:
+        return False
+    if abs(float(payload.get("close_line_tol") or 0) - close_tol) > 1e-6:
+        return False
+    adm = load_admiralbet_lines()
+    if (payload.get("admiral_fetched_at") or None) != (adm.get("fetched_at") or None):
+        return False
+    # Board mtime — Cloud may keep a stale compare JSON across deploys
+    board_path = BET365_BOARD_PATH
+    if board_path.exists():
+        cached_mtime = payload.get("bet365_board_mtime")
+        try:
+            mtime = board_path.stat().st_mtime
+        except OSError:
+            mtime = None
+        if cached_mtime is None or mtime is None or abs(float(cached_mtime) - float(mtime)) > 1e-3:
+            return False
+    # Empty result with overlapping sources is almost always a stale cache
+    summ = payload.get("summary") or {}
+    if int(summ.get("exact_half_line_matches") or 0) == 0 and int(
+        summ.get("close_line_matches") or 0
+    ) == 0 and int(summ.get("input_players") or 0) > 0:
+        return False
+    return True
 
 
 def comparison_table_df(
