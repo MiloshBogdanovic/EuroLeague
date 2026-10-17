@@ -6,6 +6,11 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# Local secrets
+.env
+.env.*
+!.env.example
+
 # Runtime logs only — keep CSV caches in git for fewer API calls on deploy
 data/*.log
 *.log
@@ -40,3 +45,14 @@ captures/
 # Regenerated on Market cut page — optional local cache
 # (keep bet365_points_board.json + admiralbet_lines.json tracked for Cloud)
 data/market_value_compare.json
+
+# OddsPapi live pulls (commit oddspapi_points_board.json when you want Cloud updated)
+data/oddspapi_bookmakers.json
+data/oddspapi_markets_basketball.json
+data/oddspapi_props.json
+data/oddspapi_bet365.json
+data/oddspapi_1xbet.json
+data/oddspapi_mozzart*.json
+data/oddspapi_maxbet*.json
+data/oddspapi_superbet*.json
+data/oddspapi_points_board.json

@@ -35,9 +35,14 @@ from euro_market_compare import (
     comparison_cache_is_fresh,
     comparison_table_df,
     decorate_flags,
-    load_bet365_board,
     load_comparison,
+    load_props_board,
     save_comparison,
+)
+from euro_oddspapi import (
+    api_ready as oddspapi_ready,
+    load_oddspapi_meta,
+    refresh_euroleague_props,
 )
 from euro_utils import (
     DATA_DIR,
@@ -788,40 +793,40 @@ def render_h2h_block(season: int, team_code: str, our_form: pd.DataFrame) -> Non
 
 
 def render_market_cut_page() -> None:
-    """Bet365 N+ vs Admiral half-lines + synth Under (assumed cut)."""
+    """Milestone N+ (OddsPapi / Bet365) vs Admiral half-lines + synth Under."""
     st.title("Market cut")
     st.caption(
-        "Bet365 Points milestones (5+ / 10+ / 15+ / 20+) vs Admiral Over "
-        "(4.5 / 9.5 / 14.5 / 19.5)."
+        "Points milestones (5+ / 10+ / 15+ / 20+) from OddsPapi "
+        "(bet365 · 1xBet · Superbet RS) vs Admiral Over "
+        "(4.5 / 9.5 / 14.5 / 19.5). Screenshot board is fallback only."
     )
     with st.expander("How the margin (cut) slider works", expanded=False):
         st.markdown(
             """
-Bet365 only sells the **Over** (N+). It has no Under price, so we invent one
-so you can see both sides next to Admiral.
+Milestone books usually sell only the **Over** (N+). There is often no Under,
+so we invent one so you can see both sides next to Admiral.
 
-**Slider = assumed Bet365 overround** (default **10%**):
+**Slider = assumed overround** on the primary (bet365) Over (default **10%**):
 
-`1 / Bet365_Over + 1 / Synth_Under = 1 + margin`
+`1 / Over + 1 / Synth_Under = 1 + margin`
 
 Example at 10% with Over **1.64**:
 - implied Over ≈ 61.0%
 - leftover for Under ≈ 1.10 − 0.61 = 49.0% → synth Under ≈ **2.04**
 
-Move the slider up (e.g. 12%) → synth Under gets **shorter** (more juice assumed).
-Move it down (e.g. 5%) → synth Under gets **longer**.
-
 **What the slider changes**
-- `b365_synth_under` and **`under_gap (AdmU − synthU)`** — rebuild when you move it.
+- `b365_synth_under` and **`under_gap (AdmU − synthU)`**
 
 **What it does not change**
-- Real Over prices, **`over_gap (B365 − Adm)`**, or MASSIVE undercut flags.
+- Real Over prices from any book, **`over_gap (B365 − Adm)`**, or undercut flags.
 """
         )
 
-    board = load_bet365_board()
+    board = load_props_board()
     games = board.get("games") or []
     players = board_player_summary(board)
+    src_label = board.get("source") or "screenshot"
+    books_label = ", ".join(board.get("books") or []) or "bet365 (legacy)"
 
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1.5])
     with c1:
@@ -847,7 +852,8 @@ Move it down (e.g. 5%) → synth Under gets **longer**.
         rebuild = st.button("Rebuild comparison", type="primary", use_container_width=True)
     with c4:
         st.caption(
-            f"Input: **{len(games)}** games · **{len(players)}** players · "
+            f"Source: **{src_label}** ({books_label}) · "
+            f"**{len(games)}** games · **{len(players)}** players · "
             f"`{COMPARE_PATH.name}`"
         )
 
@@ -877,9 +883,22 @@ Move it down (e.g. 5%) → synth Under gets **longer**.
     event_opts = ["All games"] + [g.get("event") or f"Game {i+1}" for i, g in enumerate(games)]
     pick = st.selectbox("Filter by game", options=event_opts, key="market_cut_game")
 
-    st.subheader("Input players (Bet365 boards)")
+    st.subheader("Input players (props board)")
     if not players:
-        st.warning(f"No players in `{board.get('path') or 'data/bet365_points_board.json'}`.")
+        op_meta = load_oddspapi_meta()
+        if op_meta.get("fetched_at") and (op_meta.get("summary") or {}).get("fixtures_fetched"):
+            st.info(
+                op_meta.get("empty_props_note")
+                or (
+                    "Fixtures loaded, but player props are not out yet. "
+                    "Re-refresh closer to tip-off / gameday to continue testing."
+                )
+            )
+        else:
+            st.warning(
+                f"No players in `{board.get('path') or 'data/oddspapi_points_board.json'}`. "
+                "Refresh OddsPapi props from the sidebar (needs `ODDSPAPI_API_KEY`)."
+            )
     else:
         show = players if pick == "All games" else [p for p in players if p.get("event") == pick]
         st.dataframe(pd.DataFrame(show), use_container_width=True, hide_index=True)
@@ -891,12 +910,16 @@ Move it down (e.g. 5%) → synth Under gets **longer**.
     over_col = "over_gap (B365−Adm)"
     under_col = "under_gap (AdmU−synthU)"
 
+    books_used = cmp_payload.get("board_books") or summ.get("books") or []
     st.caption(
-        f"Sources → Bet365 players **{summ.get('input_players', 0)}** · "
+        f"Sources → **{cmp_payload.get('board_source') or src_label}** "
+        f"({', '.join(books_used) if books_used else '—'}) · "
+        f"players **{summ.get('input_players', 0)}** · "
         f"exact **{summ.get('exact_half_line_matches', 0)}** · "
         f"close **{summ.get('close_line_matches', 0)}** · "
         f"far **{summ.get('far_nearest', 0)}** · "
-        f"Admiral fetched `{cmp_payload.get('admiral_fetched_at') or '—'}`"
+        f"OddsPapi `{cmp_payload.get('oddspapi_fetched_at') or '—'}` · "
+        f"Admiral `{cmp_payload.get('admiral_fetched_at') or '—'}`"
     )
     # Guard: zero overlaps after rebuild (wrong gameday or name mismatch)
     if (
@@ -1019,16 +1042,67 @@ def main() -> None:
 
     if page == "Market cut":
         with st.sidebar:
-            st.caption("Bet365 board → Admiral half-lines + synth Under.")
+            st.caption("OddsPapi milestones → Admiral half-lines + synth Under.")
             odds_meta = load_admiralbet_lines()
             st.caption(
                 f"Admiral rows={odds_meta.get('summary', {}).get('row_count', 0)} · "
                 f"fetched={odds_meta.get('fetched_at') or '—'}"
             )
-            board = load_bet365_board()
+            op_meta = load_oddspapi_meta()
+            st.caption(
+                f"OddsPapi games={op_meta.get('summary', {}).get('games', 0)} · "
+                f"players={op_meta.get('summary', {}).get('players', 0)} · "
+                f"fetched={op_meta.get('fetched_at') or '—'} · "
+                f"books={', '.join(op_meta.get('books') or []) or '—'}"
+            )
+            if op_meta.get("empty_props_note") and not (op_meta.get("summary") or {}).get(
+                "props_ready"
+            ):
+                st.info(op_meta["empty_props_note"])
+            board = load_props_board()
             n_games = len(board.get("games") or [])
             n_players = len(board_player_summary(board))
-            st.caption(f"Bet365 input: {n_games} games · {n_players} players")
+            st.caption(
+                f"Active board ({board.get('source') or '—'}): "
+                f"{n_games} games · {n_players} players"
+            )
+            op_ok, op_reason = oddspapi_ready()
+            if not op_ok:
+                st.info(op_reason)
+            elif is_streamlit_cloud():
+                st.info(
+                    "OddsPapi refresh is local-only (quota). "
+                    "Push `data/oddspapi_*.json` after a local refresh."
+                )
+            else:
+                refresh_op = st.button(
+                    "Refresh OddsPapi props",
+                    help="Near-term fixtures: bet365 + 1xBet + superbet.rs (uses several free-tier requests).",
+                )
+                if refresh_op:
+                    with st.spinner("Fetching EuroLeague props from OddsPapi…"):
+                        try:
+                            result = refresh_euroleague_props()
+                            if result.get("error") or not result.get("ok"):
+                                st.warning(result.get("error") or "OddsPapi refresh failed")
+                                ui_log(f"OddsPapi refresh: {result}", "error")
+                            else:
+                                ui_log(f"OddsPapi refresh: {result.get('summary')}")
+                                n_pl = int((result.get("summary") or {}).get("players") or 0)
+                                if n_pl == 0 and result.get("empty_props_note"):
+                                    st.info(result["empty_props_note"])
+                                else:
+                                    st.success(
+                                        f"Saved {n_pl} players · "
+                                        f"books={', '.join(result.get('books') or [])}"
+                                    )
+                                st.rerun()
+                        except Exception as exc:  # noqa: BLE001
+                            ui_log(
+                                f"OddsPapi refresh failed: {exc}\n{traceback.format_exc()}",
+                                "error",
+                            )
+                            st.error(f"OddsPapi refresh failed: {exc}")
         render_market_cut_page()
         render_logs_panel()
         return
@@ -1093,6 +1167,47 @@ def main() -> None:
                     except Exception as exc:  # noqa: BLE001
                         ui_log(f"AdmiralBet refresh failed: {exc}\n{traceback.format_exc()}", "error")
                         st.error(f"Refresh failed: {exc}")
+
+        st.subheader("OddsPapi props")
+        op_meta = load_oddspapi_meta()
+        st.caption(
+            f"players={op_meta.get('summary', {}).get('players', 0)} · "
+            f"fetched={op_meta.get('fetched_at') or '—'} · "
+            f"books={', '.join(op_meta.get('books') or []) or '—'}"
+        )
+        if op_meta.get("empty_props_note") and not (op_meta.get("summary") or {}).get("props_ready"):
+            st.caption(op_meta["empty_props_note"])
+        op_ok, op_reason = oddspapi_ready()
+        if is_streamlit_cloud():
+            st.caption("Refresh OddsPapi locally, then commit `data/oddspapi_*.json`.")
+        elif not op_ok:
+            st.caption(op_reason)
+        else:
+            refresh_op = st.button(
+                "Refresh OddsPapi props",
+                key="form_refresh_oddspapi",
+                help="bet365 + 1xBet + superbet.rs EuroLeague player milestones (near-term fixtures).",
+            )
+            if refresh_op:
+                with st.spinner("Fetching EuroLeague props from OddsPapi…"):
+                    try:
+                        result = refresh_euroleague_props()
+                        if result.get("error") or not result.get("ok"):
+                            st.warning(result.get("error") or "OddsPapi refresh failed")
+                            ui_log(f"OddsPapi refresh: {result}", "error")
+                        else:
+                            ui_log(f"OddsPapi refresh: {result.get('summary')}")
+                            n_pl = int((result.get("summary") or {}).get("players") or 0)
+                            if n_pl == 0 and result.get("empty_props_note"):
+                                st.info(result["empty_props_note"])
+                            else:
+                                st.success(f"Saved {n_pl} players.")
+                    except Exception as exc:  # noqa: BLE001
+                        ui_log(
+                            f"OddsPapi refresh failed: {exc}\n{traceback.format_exc()}",
+                            "error",
+                        )
+                        st.error(f"OddsPapi refresh failed: {exc}")
         if clear:
             st.cache_data.clear()
             st.session_state.pop("team_form", None)
