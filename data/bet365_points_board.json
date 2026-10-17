@@ -1,0 +1,265 @@
+{
+  "source": "bet365 screenshots",
+  "note": "N+ maps to Admiral Over (N-0.5). Locked/blank cells omitted.",
+  "games": [
+    {
+      "event": "Besiktas vs Bayern Munich",
+      "tip_off": "2026-10-16T19:00",
+      "players": [
+        {
+          "player": "Duane Washington Jr.",
+          "team_hint": "Bayern",
+          "odds": { "15+": 1.36, "20+": 2.25, "25+": 4.75, "30+": 10.0, "35+": 19.0 }
+        },
+        {
+          "player": "Scottie Wilbekin",
+          "team_hint": "Besiktas",
+          "odds": { "10+": 1.11, "15+": 1.55, "20+": 2.85, "25+": 6.75, "30+": 14.0 }
+        },
+        {
+          "player": "Andreas Obst",
+          "team_hint": "Bayern",
+          "odds": { "10+": 1.4, "15+": 2.6, "20+": 6.5, "25+": 14.0, "30+": 29.0 }
+        },
+        {
+          "player": "Jaylen Nowell",
+          "team_hint": "Besiktas",
+          "odds": { "10+": 1.43, "15+": 2.95, "20+": 7.75, "25+": 18.0, "30+": 30.0 }
+        },
+        {
+          "player": "Ante Zizic",
+          "team_hint": "Besiktas",
+          "odds": { "5+": 1.071, "10+": 1.64, "15+": 3.9, "20+": 10.5, "25+": 21.0 }
+        },
+        {
+          "player": "MarJon Beauchamp",
+          "team_hint": "Bayern",
+          "odds": { "5+": 1.083, "10+": 1.74, "15+": 4.2, "20+": 11.5, "25+": 23.0 }
+        },
+        {
+          "player": "Anthony Brown",
+          "team_hint": "Besiktas",
+          "odds": { "5+": 1.12, "10+": 1.89, "15+": 4.75, "20+": 12.0, "25+": 26.0 }
+        },
+        {
+          "player": "Devon Dotson",
+          "team_hint": "Besiktas",
+          "odds": { "5+": 1.09, "10+": 1.8, "15+": 4.5, "20+": 12.0, "25+": 26.0 }
+        },
+        {
+          "player": "Rokas Jokubaitis",
+          "team_hint": "Bayern",
+          "odds": { "5+": 1.14, "10+": 2.1, "15+": 6.0, "20+": 16.0, "25+": 36.0 }
+        },
+        {
+          "player": "Johannes Thiemann",
+          "team_hint": "Bayern",
+          "odds": { "5+": 1.14, "10+": 2.15, "15+": 6.25, "20+": 17.0, "25+": 36.0 }
+        },
+        {
+          "player": "Conor Morgan",
+          "team_hint": "Besiktas",
+          "odds": { "5+": 1.22, "10+": 2.55, "15+": 8.25, "20+": 19.0, "25+": 36.0 }
+        },
+        {
+          "player": "Austin Wiley",
+          "team_hint": "Bayern",
+          "odds": { "5+": 1.27, "10+": 3.0, "15+": 9.75, "20+": 23.0, "25+": 36.0 }
+        }
+      ]
+    },
+    {
+      "event": "Crvena Zvezda vs Paris",
+      "tip_off": "2026-10-16T20:00",
+      "players": [
+        {
+          "player": "Tyson Etienne",
+          "team_hint": "Paris",
+          "odds": { "15+": 1.5, "20+": 2.6, "25+": 5.5, "30+": 11.5, "35+": 20.0 }
+        },
+        {
+          "player": "Jordan Nwora",
+          "team_hint": "Crvena Zvezda",
+          "odds": { "10+": 1.11, "15+": 1.6, "20+": 3.05, "25+": 7.25, "30+": 16.0 }
+        },
+        {
+          "player": "TJ Warren",
+          "team_hint": "Paris",
+          "odds": { "10+": 1.18, "15+": 1.89, "20+": 4.1, "25+": 10.0, "30+": 19.0 }
+        },
+        {
+          "player": "Chima Moneke",
+          "team_hint": "Crvena Zvezda",
+          "odds": { "10+": 1.25, "15+": 2.15, "20+": 5.25, "25+": 12.0, "30+": 23.0 }
+        },
+        {
+          "player": "Jared Butler",
+          "team_hint": "Crvena Zvezda",
+          "odds": { "10+": 1.47, "15+": 3.0, "20+": 7.75, "25+": 18.0, "30+": 36.0 }
+        },
+        {
+          "player": "Jared Rhoden",
+          "team_hint": "Paris",
+          "odds": { "10+": 1.47, "15+": 3.05, "20+": 8.25, "25+": 18.0, "30+": 36.0 }
+        },
+        {
+          "player": "Semi Ojeleye",
+          "team_hint": "Crvena Zvezda",
+          "odds": { "5+": 1.071, "10+": 1.64, "15+": 3.8, "20+": 10.0, "25+": 20.0 }
+        },
+        {
+          "player": "Sebastian Herrera",
+          "team_hint": "Paris",
+          "odds": { "5+": 1.14, "10+": 2.0, "15+": 4.5, "20+": 11.5, "25+": 23.0 }
+        },
+        {
+          "player": "Chris Jones",
+          "team_hint": "Crvena Zvezda",
+          "odds": { "5+": 1.09, "10+": 1.8, "15+": 4.5, "20+": 12.0, "25+": 26.0 }
+        },
+        {
+          "player": "Mouhamed Faye",
+          "team_hint": "Paris",
+          "odds": { "5+": 1.37, "10+": 3.65, "15+": 12.0, "20+": 29.0 }
+        },
+        {
+          "player": "Nick Weiler-Babb",
+          "team_hint": "Crvena Zvezda",
+          "odds": { "5+": 1.83, "10+": 7.0, "15+": 20.0, "20+": 36.0 }
+        }
+      ]
+    },
+    {
+      "event": "Zalgiris vs Anadolu Efes",
+      "tip_off": "2026-10-16T19:00",
+      "players": [
+        {
+          "player": "Carsen Edwards",
+          "team_hint": "Zalgiris",
+          "odds": { "15+": 1.41, "20+": 2.4, "25+": 5.25, "30+": 11.0, "35+": 19.0 }
+        },
+        {
+          "player": "Cameron Payne",
+          "team_hint": "Anadolu Efes",
+          "odds": { "10+": 1.22, "15+": 1.9, "20+": 4.2, "25+": 9.75, "30+": 19.0 }
+        },
+        {
+          "player": "Dario Saric",
+          "team_hint": "Anadolu Efes",
+          "odds": { "10+": 1.27, "15+": 2.25, "20+": 5.5, "25+": 13.0, "30+": 26.0 }
+        },
+        {
+          "player": "Jonas Valanciunas",
+          "team_hint": "Zalgiris",
+          "odds": { "10+": 1.29, "15+": 2.4, "20+": 6.0, "25+": 14.0, "30+": 29.0 }
+        },
+        {
+          "player": "Matthew Strazel",
+          "team_hint": "Anadolu Efes",
+          "odds": { "10+": 1.41, "15+": 2.82, "20+": 7.5, "25+": 17.0, "30+": 36.0 }
+        },
+        {
+          "player": "Azuolas Tubelis",
+          "team_hint": "Zalgiris",
+          "odds": { "10+": 1.52, "15+": 3.35, "20+": 9.5, "25+": 19.0, "30+": 36.0 }
+        },
+        {
+          "player": "Jordan Loyd",
+          "team_hint": "Anadolu Efes",
+          "odds": { "5+": 1.083, "10+": 1.66, "15+": 3.75, "20+": 9.75, "25+": 20.0 }
+        },
+        {
+          "player": "Sterling Brown",
+          "team_hint": "Zalgiris",
+          "odds": { "5+": 1.11, "10+": 1.86, "15+": 4.75, "20+": 12.0, "25+": 26.0 }
+        },
+        {
+          "player": "Marius Grigonis",
+          "team_hint": "Zalgiris",
+          "odds": { "5+": 1.25, "10+": 2.6, "15+": 7.5, "20+": 18.0, "25+": 36.0 }
+        },
+        {
+          "player": "Bruno Fernando",
+          "team_hint": "Anadolu Efes",
+          "odds": { "5+": 1.22, "10+": 2.6, "15+": 8.5, "20+": 20.0, "25+": 36.0 }
+        },
+        {
+          "player": "Collin Malcolm",
+          "team_hint": "Anadolu Efes",
+          "odds": { "5+": 1.22, "10+": 2.6, "15+": 8.5, "20+": 20.0, "25+": 36.0 }
+        },
+        {
+          "player": "Dustin Sleva",
+          "team_hint": "Zalgiris",
+          "odds": { "5+": 1.33, "10+": 3.4, "15+": 11.0, "20+": 26.0, "25+": 36.0 }
+        }
+      ]
+    },
+    {
+      "event": "Virtus Bologna vs Baskonia",
+      "tip_off": "2026-10-16T20:30",
+      "players": [
+        {
+          "player": "Derrick Alston Jr",
+          "team_hint": "Virtus Bologna",
+          "odds": { "10+": 1.15, "15+": 1.74, "20+": 3.5, "25+": 8.25, "30+": 17.0 }
+        },
+        {
+          "player": "Wendell Moore Jr.",
+          "team_hint": "Virtus Bologna",
+          "odds": { "10+": 1.25, "15+": 2.15, "20+": 5.0, "25+": 11.5, "30+": 21.0 }
+        },
+        {
+          "player": "AJ Lawson",
+          "team_hint": "Baskonia",
+          "odds": { "10+": 1.3, "15+": 2.3, "20+": 5.5, "25+": 12.0, "30+": 23.0 }
+        },
+        {
+          "player": "Marcus Carr",
+          "team_hint": "Virtus Bologna",
+          "odds": { "10+": 1.31, "15+": 2.4, "20+": 6.0, "25+": 14.0, "30+": 29.0 }
+        },
+        {
+          "player": "Chris Duarte",
+          "team_hint": "Baskonia",
+          "odds": { "10+": 1.32, "15+": 2.4, "20+": 6.0, "25+": 14.0, "30+": 26.0 }
+        },
+        {
+          "player": "Trent Frazier",
+          "team_hint": "Virtus Bologna",
+          "odds": { "5+": 1.11, "10+": 1.8, "15+": 4.5, "20+": 11.0, "25+": 23.0 }
+        },
+        {
+          "player": "Aliou Diarra",
+          "team_hint": "Virtus Bologna",
+          "odds": { "5+": 1.1, "10+": 1.89, "15+": 5.0, "20+": 13.0, "25+": 29.0 }
+        },
+        {
+          "player": "Tadas Sedekerskis",
+          "team_hint": "Baskonia",
+          "odds": { "5+": 1.1, "10+": 1.83, "15+": 4.75, "20+": 13.0, "25+": 26.0 }
+        },
+        {
+          "player": "DJ Stewart",
+          "team_hint": "Baskonia",
+          "odds": { "5+": 1.13, "10+": 2.0, "15+": 5.25, "20+": 14.0, "25+": 29.0 }
+        },
+        {
+          "player": "Kobi Simmons",
+          "team_hint": "Baskonia",
+          "odds": { "5+": 1.15, "10+": 2.25, "15+": 6.75, "20+": 18.0, "25+": 36.0 }
+        },
+        {
+          "player": "Kenneth Faried",
+          "team_hint": "Baskonia",
+          "odds": { "5+": 1.18, "10+": 2.4, "15+": 7.5, "20+": 19.0, "25+": 36.0 }
+        },
+        {
+          "player": "Mouhamet Diouf",
+          "team_hint": "Virtus Bologna",
+          "odds": { "5+": 1.22, "10+": 2.6, "15+": 8.5, "20+": 20.0, "25+": 36.0 }
+        }
+      ]
+    }
+  ]
+}

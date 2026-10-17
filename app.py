@@ -25,6 +25,20 @@ from euro_admiralbet import (
     match_player_lines,
     playwright_ready,
 )
+from euro_market_compare import (
+    COMPARE_PATH,
+    DEFAULT_B365_MARGIN,
+    DEFAULT_CLOSE_LINE_TOL,
+    MASSIVE_UNDERCUT,
+    board_player_summary,
+    build_comparison,
+    comparison_cache_is_fresh,
+    comparison_table_df,
+    decorate_flags,
+    load_bet365_board,
+    load_comparison,
+    save_comparison,
+)
 from euro_utils import (
     DATA_DIR,
     annotate_vs_specific_defenders,
@@ -773,7 +787,252 @@ def render_h2h_block(season: int, team_code: str, our_form: pd.DataFrame) -> Non
         _render_category_leaders(_label(rival), opp_h2h_form, h2h=True)
 
 
+def render_market_cut_page() -> None:
+    """Bet365 N+ vs Admiral half-lines + synth Under (assumed cut)."""
+    st.title("Market cut")
+    st.caption(
+        "Bet365 Points milestones (5+ / 10+ / 15+ / 20+) vs Admiral Over "
+        "(4.5 / 9.5 / 14.5 / 19.5)."
+    )
+    with st.expander("How the margin (cut) slider works", expanded=False):
+        st.markdown(
+            """
+Bet365 only sells the **Over** (N+). It has no Under price, so we invent one
+so you can see both sides next to Admiral.
+
+**Slider = assumed Bet365 overround** (default **10%**):
+
+`1 / Bet365_Over + 1 / Synth_Under = 1 + margin`
+
+Example at 10% with Over **1.64**:
+- implied Over ≈ 61.0%
+- leftover for Under ≈ 1.10 − 0.61 = 49.0% → synth Under ≈ **2.04**
+
+Move the slider up (e.g. 12%) → synth Under gets **shorter** (more juice assumed).
+Move it down (e.g. 5%) → synth Under gets **longer**.
+
+**What the slider changes**
+- `b365_synth_under` and **`under_gap (AdmU − synthU)`** — rebuild when you move it.
+
+**What it does not change**
+- Real Over prices, **`over_gap (B365 − Adm)`**, or MASSIVE undercut flags.
+"""
+        )
+
+    board = load_bet365_board()
+    games = board.get("games") or []
+    players = board_player_summary(board)
+
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 1.5])
+    with c1:
+        margin_pct = st.slider(
+            "Bet365 margin (cut) %",
+            min_value=5,
+            max_value=15,
+            value=int(st.session_state.get("b365_margin_pct", DEFAULT_B365_MARGIN * 100)),
+            step=1,
+            key="b365_margin_pct",
+        )
+    with c2:
+        close_tol = st.slider(
+            "Close line ±",
+            min_value=0.5,
+            max_value=2.0,
+            value=float(st.session_state.get("close_line_tol", DEFAULT_CLOSE_LINE_TOL)),
+            step=0.5,
+            key="close_line_tol",
+            help="2nd table: |Admiral line − Bet365 half-line| ≤ this (e.g. 15.5 vs 14.5).",
+        )
+    with c3:
+        rebuild = st.button("Rebuild comparison", type="primary", use_container_width=True)
+    with c4:
+        st.caption(
+            f"Input: **{len(games)}** games · **{len(players)}** players · "
+            f"`{COMPARE_PATH.name}`"
+        )
+
+    margin = margin_pct / 100.0
+    cmp_payload = None
+    # Cloud can keep a stale gitignored market_value_compare.json across deploys.
+    # Always rebuild unless an explicit cache is proven fresh vs live sources.
+    cached = None if rebuild else load_comparison()
+    need_rebuild = rebuild or not comparison_cache_is_fresh(
+        cached, margin=margin, close_tol=close_tol
+    )
+    if need_rebuild:
+        try:
+            cmp_payload = save_comparison(margin=margin, close_tol=close_tol)
+            if cmp_payload.get("save_error"):
+                st.caption(f"Compare built in-memory (could not write cache: {cmp_payload['save_error']})")
+        except Exception as exc:  # noqa: BLE001
+            ui_log(f"Market compare failed: {exc}\n{traceback.format_exc()}", "error")
+            st.error(f"Compare failed: {exc}")
+            try:
+                cmp_payload = build_comparison(margin=margin, close_tol=close_tol)
+            except Exception:  # noqa: BLE001
+                cmp_payload = None
+    else:
+        cmp_payload = cached
+
+    event_opts = ["All games"] + [g.get("event") or f"Game {i+1}" for i, g in enumerate(games)]
+    pick = st.selectbox("Filter by game", options=event_opts, key="market_cut_game")
+
+    st.subheader("Input players (Bet365 boards)")
+    if not players:
+        st.warning(f"No players in `{board.get('path') or 'data/bet365_points_board.json'}`.")
+    else:
+        show = players if pick == "All games" else [p for p in players if p.get("event") == pick]
+        st.dataframe(pd.DataFrame(show), use_container_width=True, hide_index=True)
+
+    if not cmp_payload:
+        return
+
+    summ = cmp_payload.get("summary") or {}
+    over_col = "over_gap (B365−Adm)"
+    under_col = "under_gap (AdmU−synthU)"
+
+    st.caption(
+        f"Sources → Bet365 players **{summ.get('input_players', 0)}** · "
+        f"exact **{summ.get('exact_half_line_matches', 0)}** · "
+        f"close **{summ.get('close_line_matches', 0)}** · "
+        f"far **{summ.get('far_nearest', 0)}** · "
+        f"Admiral fetched `{cmp_payload.get('admiral_fetched_at') or '—'}`"
+    )
+    # Guard: zero overlaps after rebuild (wrong gameday or name mismatch)
+    if (
+        int(summ.get("exact_half_line_matches") or 0) == 0
+        and int(summ.get("close_line_matches") or 0) == 0
+        and int(summ.get("far_nearest") or 0) == 0
+    ):
+        adm_meta = load_admiralbet_lines()
+        adm_teams = sorted(
+            {
+                str(r.get("team") or "")
+                for r in (adm_meta.get("lines") or [])
+                if r.get("market") == "Points" and r.get("team")
+            }
+        )
+        b365_hints = sorted(
+            {str(p.get("team_hint") or "") for p in players if p.get("team_hint")}
+        )
+        st.warning(
+            "No player overlaps after rebuild. "
+            f"Admiral fetched {adm_meta.get('fetched_at') or '—'}. "
+            f"Bet365 teams: {', '.join(b365_hints) or '—'}. "
+            f"Admiral PTS teams: {', '.join(adm_teams) or '—'}."
+        )
+
+    def _filter_game(df: pd.DataFrame) -> pd.DataFrame:
+        if pick == "All games" or df.empty or "event" not in df.columns:
+            return df
+        return df[df["event"] == pick].reset_index(drop=True)
+
+    def _gap_metrics(df: pd.DataFrame, title: str) -> None:
+        if df.empty:
+            return
+        st.caption(title)
+        m1, m2, m3, m4 = st.columns(4)
+        if over_col in df.columns and df[over_col].notna().any():
+            i_over = df[over_col].idxmin()
+            r_over = df.loc[i_over]
+            m1.metric(
+                "Biggest Over undercut",
+                f"{r_over[over_col]:+.3f}",
+                delta=f"{r_over.get('player', '')} {r_over.get('milestone', '')}",
+                delta_color="off",
+            )
+            m2.metric(
+                "B365 Over vs Adm Over",
+                f"{r_over.get('b365_over', '—')} vs {r_over.get('adm_over', '—')}",
+            )
+        if under_col in df.columns and df[under_col].notna().any():
+            i_under = df[under_col].abs().idxmax()
+            r_under = df.loc[i_under]
+            m3.metric(
+                "Largest |Under gap|",
+                f"{r_under[under_col]:+.3f}",
+                delta=f"{r_under.get('player', '')} {r_under.get('milestone', '')}",
+                delta_color="off",
+            )
+            synth_col = "b365_synth_under (from slider)"
+            m4.metric(
+                "Adm U vs synth U",
+                f"{r_under.get('adm_under', '—')} vs {r_under.get(synth_col, '—')}",
+            )
+
+    # --- Table 1: exact 5+↔4.5, 10+↔9.5, ... ---
+    st.subheader("1) Exact matches (5+↔4.5, 10+↔9.5, 15+↔14.5, 20+↔19.5)")
+    st.markdown(
+        f"""
+**Over gap** = Bet365 Over − Admiral Over (negative = Bet365 shorter).  
+**Under gap** = Admiral Under − synth Bet365 Under (slider margin
+`{cmp_payload.get('b365_margin_assumed', margin):.0%}`).  
+🔴 MASSIVE when over gap ≤ {MASSIVE_UNDERCUT:.2f}.  
+Exact rows: **{summ.get('exact_half_line_matches', 0)}**.
+"""
+    )
+    exact_df = _filter_game(comparison_table_df(cmp_payload, tier="exact"))
+    if exact_df.empty:
+        st.info("No exact half-line overlaps with Admiral right now.")
+    else:
+        _gap_metrics(exact_df, "Exact-match gap highlights")
+        st.caption("🔴 MASSIVE undercut · 🟠 undercut · 🟢 Bet365 longer")
+        st.dataframe(decorate_flags(exact_df), use_container_width=True, hide_index=True)
+
+    # --- Table 2: close lines (e.g. 15.5 vs 14.5) ---
+    st.subheader(f"2) Close lines (|Adm line − Bet365 half-line| ≤ {close_tol:g})")
+    st.caption(
+        "Same Over/Under gap math, but Admiral’s posted line is only *near* the "
+        "Bet365 milestone (e.g. Bet365 15+ / 14.5 vs Admiral 15.5)."
+    )
+    close_df = _filter_game(comparison_table_df(cmp_payload, tier="close"))
+    if close_df.empty:
+        st.info(f"No close-line pairs within ±{close_tol:g} right now.")
+    else:
+        st.caption(f"Close rows: **{summ.get('close_line_matches', 0)}** (all games) · 🟡 close line")
+        _gap_metrics(close_df, "Close-line gap highlights")
+        st.dataframe(decorate_flags(close_df), use_container_width=True, hide_index=True)
+
+    with st.expander(
+        f"Far nearest only (no gaps) — {summ.get('far_nearest', 0)} rows",
+        expanded=False,
+    ):
+        far_df = _filter_game(comparison_table_df(cmp_payload, tier="far"))
+        if far_df.empty:
+            st.caption("None.")
+        else:
+            st.caption("Admiral line too far from Bet365 half-line — gaps left empty on purpose.")
+            st.dataframe(far_df, use_container_width=True, hide_index=True)
+
+    st.caption(f"Saved → `{COMPARE_PATH.as_posix()}`")
+
+
 def main() -> None:
+    with st.sidebar:
+        page = st.radio(
+            "Page",
+            options=["Form", "Market cut"],
+            index=0,
+            key="app_page",
+        )
+        st.divider()
+
+    if page == "Market cut":
+        with st.sidebar:
+            st.caption("Bet365 board → Admiral half-lines + synth Under.")
+            odds_meta = load_admiralbet_lines()
+            st.caption(
+                f"Admiral rows={odds_meta.get('summary', {}).get('row_count', 0)} · "
+                f"fetched={odds_meta.get('fetched_at') or '—'}"
+            )
+            board = load_bet365_board()
+            n_games = len(board.get("games") or [])
+            n_players = len(board_player_summary(board))
+            st.caption(f"Bet365 input: {n_games} games · {n_players} players")
+        render_market_cut_page()
+        render_logs_panel()
+        return
+
     st.title("EuroLeague player form")
     st.caption(
         "Team form, player this+last season, then vs next opponent and vs that "

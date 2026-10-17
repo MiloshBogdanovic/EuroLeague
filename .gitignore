@@ -12,9 +12,31 @@ data/*.log
 
 # Cursor / local MCP (not used on Streamlit Cloud)
 .cursor/
-tools/admiralbet_mcp/
+tools/
+**/admiralbet_mcp/
 **/admiralbet_mcp/__pycache__/
 
-# Local odds scratch / MCP dumps (keep admiralbet_lines.json tracked for Cloud UI)
+# Local scrape / image-extraction / probe scratch (Cloud uses committed JSON only)
+_*.py
+_*.json
+data/_*.json
 data/admiralbet_capture.json
-data/_ab_*.json
+data/pinnacle_*.json
+data/*_euro_*.json
+*_probe*.py
+*_cmp*.py
+*_pin_*.py
+*_adm_*.py
+
+# Screenshots / vision dumps (odds boards go into data/bet365_points_board.json by hand)
+*.png
+*.jpg
+*.jpeg
+*.webp
+assets/
+screenshots/
+captures/
+
+# Regenerated on Market cut page — optional local cache
+# (keep bet365_points_board.json + admiralbet_lines.json tracked for Cloud)
+data/market_value_compare.json
