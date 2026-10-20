@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 from euro_admiralbet import load_admiralbet_lines
+from euro_1x2online import BOOK_SLUG as BOOK_1X2ONLINE
+from euro_1x2online import load_1x2online_lines
 from euro_oddspapi import BOARD_PATH as ODDSPAPI_BOARD_PATH
 from euro_oddspapi import BOOK_1XBET, BOOK_BET365, board_books, load_oddspapi_board
 from euro_utils import DATA_DIR
@@ -25,6 +27,8 @@ BET365_BOARD_PATH = DATA_DIR / "bet365_points_board.json"
 COMPARE_PATH = DATA_DIR / "market_value_compare.json"
 
 BOOK_ADMIRAL = "admiralbet"
+# Local scrape books (not OddsPapi) — same Points O/U shape for Market cut.
+SCRAPE_BOOKS = (BOOK_ADMIRAL, BOOK_1X2ONLINE)
 
 DEFAULT_B365_MARGIN = 0.10  # synth Under overround when primary has Over only
 DEFAULT_CLOSE_LINE_TOL = 1.0
@@ -249,16 +253,32 @@ def _name_match_score(
     return 0
 
 
+def _load_scrape_payload(book: str) -> dict[str, Any]:
+    if book == BOOK_ADMIRAL:
+        return load_admiralbet_lines()
+    if book == BOOK_1X2ONLINE:
+        return load_1x2online_lines()
+    return {"lines": [], "fetched_at": None}
+
+
+def _scrape_has_points(book: str) -> bool:
+    payload = _load_scrape_payload(book)
+    return any(
+        str(r.get("market") or "") in ("Points", "Ukupno Poena", "Ukupno poena")
+        for r in (payload.get("lines") or [])
+    )
+
+
 def available_compare_books(
     board: dict[str, Any] | None = None,
     *,
     include_admiral: bool = True,
+    include_scrapes: bool | None = None,
 ) -> list[str]:
-    """Books present on the props board (+ admiralbet when scrape has Points)."""
+    """Books on the props board (+ local scrapes with Points when present)."""
     board = board or load_props_board()
     books = board_books(board) if board.get("source") == "oddspapi" else []
     if not books:
-        # Legacy / mixed
         found: set[str] = set()
         for b in board.get("books") or []:
             found.add(str(b))
@@ -268,14 +288,11 @@ def available_compare_books(
         if not found and board.get("source"):
             found.add(BOOK_BET365)
         books = sorted(found)
-    if include_admiral:
-        adm = load_admiralbet_lines()
-        has_pts = any(
-            str(r.get("market") or "") in ("Points", "Ukupno Poena", "Ukupno poena")
-            for r in (adm.get("lines") or [])
-        )
-        if has_pts and BOOK_ADMIRAL not in books:
-            books = list(books) + [BOOK_ADMIRAL]
+    want_scrapes = include_admiral if include_scrapes is None else include_scrapes
+    if want_scrapes:
+        for slug in SCRAPE_BOOKS:
+            if _scrape_has_points(slug) and slug not in books:
+                books = list(books) + [slug]
     return books
 
 
@@ -347,10 +364,10 @@ def _quotes_for_book_on_player(player: dict[str, Any], book: str) -> list[dict[s
     return sorted(by_line.values(), key=lambda q: float(q["line"]))
 
 
-def _admiral_points_index() -> list[dict[str, Any]]:
-    adm = load_admiralbet_lines()
+def _scrape_points_index(book: str) -> list[dict[str, Any]]:
+    payload = _load_scrape_payload(book)
     out = []
-    for r in adm.get("lines") or []:
+    for r in payload.get("lines") or []:
         if str(r.get("market") or "") not in ("Points", "Ukupno Poena", "Ukupno poena"):
             continue
         try:
@@ -359,7 +376,7 @@ def _admiral_points_index() -> list[dict[str, Any]]:
             continue
         out.append(
             {
-                "book": BOOK_ADMIRAL,
+                "book": book,
                 "player": r.get("player"),
                 "team": r.get("team"),
                 "line": line,
@@ -367,26 +384,28 @@ def _admiral_points_index() -> list[dict[str, Any]]:
                 "over": float(r["over_odds"]) if r.get("over_odds") is not None else None,
                 "under": float(r["under_odds"]) if r.get("under_odds") is not None else None,
                 "has_real_under": r.get("under_odds") is not None,
-                "fetched_at": adm.get("fetched_at"),
+                "fetched_at": payload.get("fetched_at"),
             }
         )
     return out
 
 
-def _best_admiral_quote(
+def _admiral_points_index() -> list[dict[str, Any]]:
+    """Back-compat alias."""
+    return _scrape_points_index(BOOK_ADMIRAL)
+
+
+def _best_scrape_quote(
     player: str,
     line: float,
-    adm_index: list[dict[str, Any]],
+    scrape_index: list[dict[str, Any]],
     team_hint: str | None,
     *,
     close_tol: float,
 ) -> tuple[dict[str, Any] | None, str]:
-    """
-    Best Admiral quote for player near `line`.
-    Returns (quote, tier) where tier is exact|close|far|none.
-    """
+    """Best scrape quote for player near `line` → (quote, exact|close|far|none)."""
     scored: list[tuple[int, float, dict[str, Any]]] = []
-    for r in adm_index:
+    for r in scrape_index:
         score = _name_match_score(player, r.get("player") or "", r.get("team"), team_hint)
         if score <= 0:
             continue
@@ -397,15 +416,24 @@ def _best_admiral_quote(
         scored.append((score, diff, r))
     if not scored:
         return None, "none"
-    # Prefer higher name score, then closer line
     scored.sort(key=lambda t: (-t[0], t[1]))
-    best_score, best_diff, best = scored[0]
-    _ = best_score
+    _best_score, best_diff, best = scored[0]
     if best_diff < 1e-6:
         return best, "exact"
     if best_diff <= float(close_tol) + 1e-9:
         return best, "close"
     return best, "far"
+
+
+def _best_admiral_quote(
+    player: str,
+    line: float,
+    adm_index: list[dict[str, Any]],
+    team_hint: str | None,
+    *,
+    close_tol: float,
+) -> tuple[dict[str, Any] | None, str]:
+    return _best_scrape_quote(player, line, adm_index, team_hint, close_tol=close_tol)
 
 
 def _nearest_other_quote(
@@ -462,9 +490,14 @@ def build_comparison(
     if not others:
         others = [b for b in all_books if b != primary]
 
-    need_adm = primary == BOOK_ADMIRAL or BOOK_ADMIRAL in others
-    adm_index = _admiral_points_index() if need_adm else []
-    adm_meta = load_admiralbet_lines() if include_admiral or need_adm else {}
+    scrape_needed = {
+        b for b in [primary, *others] if b in SCRAPE_BOOKS
+    }
+    scrape_indexes: dict[str, list[dict[str, Any]]] = {
+        b: _scrape_points_index(b) for b in scrape_needed
+    }
+    adm_meta = load_admiralbet_lines() if BOOK_ADMIRAL in scrape_needed else {}
+    x2_meta = load_1x2online_lines() if BOOK_1X2ONLINE in scrape_needed else {}
 
     rows: list[dict[str, Any]] = []
     games = board.get("games") or []
@@ -516,6 +549,9 @@ def build_comparison(
         else:
             flag = ""
 
+        scrape_side = primary if primary in SCRAPE_BOOKS else (
+            other if other in SCRAPE_BOOKS else None
+        )
         rows.append(
             {
                 "event": event,
@@ -542,11 +578,11 @@ def build_comparison(
                 "under_gap": under_gap,
                 "flag": flag,
                 "margin": margin,
-                "adm_team": (pq.get("team") if primary == BOOK_ADMIRAL else oq.get("team"))
-                if BOOK_ADMIRAL in (primary, other)
+                "adm_team": (pq.get("team") if primary == scrape_side else oq.get("team"))
+                if scrape_side
                 else None,
-                "adm_player": (pq.get("player") if primary == BOOK_ADMIRAL else oq.get("player"))
-                if BOOK_ADMIRAL in (primary, other)
+                "adm_player": (pq.get("player") if primary == scrape_side else oq.get("player"))
+                if scrape_side
                 else None,
                 "line": p_line,
                 "b365_over": p_over if primary == BOOK_BET365 else None,
@@ -562,27 +598,29 @@ def build_comparison(
             }
         )
 
-    if primary == BOOK_ADMIRAL:
-        # Anchor on Admiral scrape; match each line to OddsPapi books via name.
+    def _match_board_player(name: str, hint: str | None):
         board_players = iter_board_players(board)
-        for aq in adm_index:
+        matched_p = None
+        best_score = 0
+        for p in board_players:
+            score = _name_match_score(
+                name, p.get("player") or "", p.get("team_hint"), hint
+            )
+            if score > best_score:
+                best_score = score
+                matched_p = p
+        if matched_p is not None and best_score > 0:
+            return matched_p
+        return None
+
+    if primary in SCRAPE_BOOKS:
+        # Anchor on local scrape; match each line to OddsPapi / other scrapes.
+        for aq in scrape_indexes.get(primary) or []:
             name = aq.get("player") or ""
             hint = aq.get("team")
-            # Attach event from best name-matched board player when possible
-            event = ""
-            tip_off = None
-            matched_p = None
-            best_score = 0
-            for p in board_players:
-                score = _name_match_score(
-                    name, p.get("player") or "", p.get("team_hint"), hint
-                )
-                if score > best_score:
-                    best_score = score
-                    matched_p = p
-            if matched_p is not None and best_score > 0:
-                event = matched_p.get("event") or ""
-                tip_off = matched_p.get("tip_off")
+            matched_p = _match_board_player(name, hint)
+            event = (matched_p.get("event") or "") if matched_p else ""
+            tip_off = matched_p.get("tip_off") if matched_p else None
             pq = {
                 "line": aq["line"],
                 "milestone": aq.get("milestone"),
@@ -593,15 +631,24 @@ def build_comparison(
                 "player": aq.get("player"),
             }
             for other in others:
-                if other == BOOK_ADMIRAL:
+                if other == primary:
                     continue
-                if matched_p is None:
-                    continue
-                oq, tier = _nearest_other_quote(
-                    float(pq["line"]),
-                    _quotes_for_book_on_player(matched_p, other),
-                    close_tol=close_tol,
-                )
+                if other in SCRAPE_BOOKS:
+                    oq, tier = _best_scrape_quote(
+                        name,
+                        float(pq["line"]),
+                        scrape_indexes.get(other) or [],
+                        hint,
+                        close_tol=close_tol,
+                    )
+                else:
+                    if matched_p is None:
+                        continue
+                    oq, tier = _nearest_other_quote(
+                        float(pq["line"]),
+                        _quotes_for_book_on_player(matched_p, other),
+                        close_tol=close_tol,
+                    )
                 if oq is None or tier == "none":
                     continue
                 _emit_pair(
@@ -626,15 +673,19 @@ def build_comparison(
 
             other_quote_maps: dict[str, list[dict[str, Any]]] = {}
             for b in others:
-                if b == BOOK_ADMIRAL:
+                if b in SCRAPE_BOOKS:
                     continue
                 other_quote_maps[b] = _quotes_for_book_on_player(p, b)
 
             for pq in primary_quotes:
                 for other in others:
-                    if other == BOOK_ADMIRAL:
-                        oq, tier = _best_admiral_quote(
-                            name, float(pq["line"]), adm_index, hint, close_tol=close_tol
+                    if other in SCRAPE_BOOKS:
+                        oq, tier = _best_scrape_quote(
+                            name,
+                            float(pq["line"]),
+                            scrape_indexes.get(other) or [],
+                            hint,
+                            close_tol=close_tol,
                         )
                     else:
                         oq, tier = _nearest_other_quote(
@@ -689,6 +740,7 @@ def build_comparison(
         "bet365_board_mtime": board_mtime,
         "board_path": str(board_path) if board_path else None,
         "admiral_fetched_at": adm_meta.get("fetched_at"),
+        "1x2online_fetched_at": x2_meta.get("fetched_at"),
         "oddspapi_fetched_at": board.get("fetched_at") if board.get("source") == "oddspapi" else None,
         "b365_margin_assumed": margin,
         "close_line_tol": close_tol,
@@ -780,6 +832,9 @@ def comparison_cache_is_fresh(
             return False
     adm = load_admiralbet_lines()
     if (payload.get("admiral_fetched_at") or None) != (adm.get("fetched_at") or None):
+        return False
+    x2 = load_1x2online_lines()
+    if (payload.get("1x2online_fetched_at") or None) != (x2.get("fetched_at") or None):
         return False
     board = load_props_board()
     if (payload.get("oddspapi_fetched_at") or None) != (

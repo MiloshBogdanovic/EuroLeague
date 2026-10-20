@@ -25,9 +25,16 @@ from euro_admiralbet import (
     match_player_lines,
     playwright_ready,
 )
+from euro_1x2online import (
+    BOOK_SLUG as BOOK_1X2ONLINE,
+    fetch_player_points as fetch_1x2online_points,
+    load_1x2online_lines,
+    playwright_ready as onex2_playwright_ready,
+)
 from euro_market_compare import (
     BOOK_ADMIRAL,
     COMPARE_PATH,
+    SCRAPE_BOOKS,
     DEFAULT_B365_MARGIN,
     DEFAULT_CLOSE_LINE_TOL,
     MASSIVE_UNDERCUT,
@@ -808,7 +815,7 @@ def render_market_cut_page() -> None:
     st.caption(
         "Pick a **primary** bookmaker, then compare its Points Over/Under to every "
         "other selected book on the **same line** or within your **close-line ±** "
-        "tolerance. AdmiralBet scrape is available as `admiralbet`."
+        "tolerance. Local scrapes: `admiralbet` · `1x2online` (Poeni igraca)."
     )
     with st.expander("How gaps work", expanded=False):
         st.markdown(
@@ -835,15 +842,19 @@ def render_market_cut_page() -> None:
         book_opts = list(DEFAULT_BOOKS)
 
     default_primary = "bet365" if "bet365" in book_opts else book_opts[0]
+
+    def _fmt_book(s: str) -> str:
+        if s in SCRAPE_BOOKS:
+            return f"{book_label(s)} (scrape)"
+        return f"{book_label(s)} ({s})"
+
     c1, c2, c3 = st.columns([1.2, 1.8, 1.2])
     with c1:
         primary = st.selectbox(
             "Primary book",
             options=book_opts,
             index=book_opts.index(default_primary) if default_primary in book_opts else 0,
-            format_func=lambda s: (
-                f"{book_label(s)} (scrape)" if s == BOOK_ADMIRAL else f"{book_label(s)} ({s})"
-            ),
+            format_func=_fmt_book,
             key="market_cut_primary",
             help="Anchor book — every other selected book is compared to this one.",
         )
@@ -854,11 +865,9 @@ def render_market_cut_page() -> None:
             "Compare against",
             options=other_opts,
             default=default_others,
-            format_func=lambda s: (
-                f"{book_label(s)} (scrape)" if s == BOOK_ADMIRAL else f"{book_label(s)} ({s})"
-            ),
+            format_func=_fmt_book,
             key="market_cut_compare_books",
-            help="OddsPapi books + optional AdmiralBet scrape.",
+            help="OddsPapi books + local scrapes (AdmiralBet, 1x2online).",
         )
     with c3:
         close_tol = st.slider(
@@ -972,7 +981,8 @@ def render_market_cut_page() -> None:
         f"close **{summ.get('close_line_matches', 0)}** · "
         f"far **{summ.get('far_nearest', 0)}** · "
         f"OddsPapi `{cmp_payload.get('oddspapi_fetched_at') or '—'}` · "
-        f"Admiral `{cmp_payload.get('admiral_fetched_at') or '—'}`"
+        f"Admiral `{cmp_payload.get('admiral_fetched_at') or '—'}` · "
+        f"1x2 `{cmp_payload.get('1x2online_fetched_at') or '—'}`"
     )
 
     if (
@@ -1371,12 +1381,64 @@ def main() -> None:
 
     if page == "Market cut":
         with st.sidebar:
-            st.caption("OddsPapi milestones → Admiral half-lines + synth Under.")
+            st.caption("Primary book vs others (OddsPapi + local scrapes).")
             odds_meta = load_admiralbet_lines()
             st.caption(
                 f"Admiral rows={odds_meta.get('summary', {}).get('row_count', 0)} · "
                 f"fetched={odds_meta.get('fetched_at') or '—'}"
             )
+            x2_meta = load_1x2online_lines()
+            st.caption(
+                f"1x2online rows={x2_meta.get('summary', {}).get('row_count', 0)} · "
+                f"fetched={x2_meta.get('fetched_at') or '—'}"
+            )
+            scrape_ok, scrape_reason = playwright_ready()
+            x2_ok, x2_reason = onex2_playwright_ready()
+            if is_streamlit_cloud() or not scrape_ok:
+                st.caption(scrape_reason or "Scrapes are local-only.")
+            else:
+                if st.button(
+                    "Refresh AdmiralBet lines",
+                    key="market_cut_refresh_admiral",
+                    help="Local Playwright scrape of Evroliga player O/U.",
+                ):
+                    with st.spinner("Scraping AdmiralBet…"):
+                        try:
+                            result = fetch_euroleague_player_totals(wait_ms=12000)
+                            if result.get("error"):
+                                st.warning(result["error"])
+                            else:
+                                st.success(
+                                    f"Admiral saved {result.get('summary', {}).get('row_count', 0)} lines."
+                                )
+                                st.rerun()
+                        except Exception as exc:  # noqa: BLE001
+                            st.error(f"Admiral refresh failed: {exc}")
+                if x2_ok and st.button(
+                    "Refresh 1x2online (Poeni igraca)",
+                    key="market_cut_refresh_1x2",
+                    help="Clicks Selektuj sve, then scrapes Broj poena UP-/G/UP+.",
+                ):
+                    with st.spinner("Scraping 1x2online (Selektuj sve → Broj poena)…"):
+                        try:
+                            result = fetch_1x2online_points(wait_ms=20000)
+                            if result.get("error"):
+                                st.warning(result["error"])
+                                ui_log(f"1x2online refresh: {result}", "error")
+                            else:
+                                st.success(
+                                    f"1x2online saved {result.get('summary', {}).get('row_count', 0)} lines."
+                                )
+                                ui_log(f"1x2online refresh: {result.get('summary')}")
+                                st.rerun()
+                        except Exception as exc:  # noqa: BLE001
+                            ui_log(
+                                f"1x2online refresh failed: {exc}\n{traceback.format_exc()}",
+                                "error",
+                            )
+                            st.error(f"1x2online refresh failed: {exc}")
+                elif not x2_ok:
+                    st.caption(x2_reason)
             _sidebar_oddspapi_refresh(
                 button_key="market_cut_refresh_oddspapi",
                 show_book_picker=True,

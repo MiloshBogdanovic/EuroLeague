@@ -61,6 +61,7 @@ BOOK_CATALOG: dict[str, dict[str, str]] = {
     BOOK_22BET: {"label": "22bet", "note": "O/U half-lines · Under"},
     BOOK_STAKE: {"label": "Stake", "note": "Milestones + O/U · Under"},
     "admiralbet": {"label": "AdmiralBet", "note": "Local scrape · Over + Under"},
+    "1x2online": {"label": "1x2online", "note": "Local scrape · Poeni igraca O/U"},
     "pinnacle": {"label": "Pinnacle", "note": "Often empty on EuroLeague"},
     "unibet": {"label": "Unibet", "note": "Often empty on EuroLeague"},
     "williamhill": {"label": "William Hill", "note": "Often empty on EuroLeague"},
