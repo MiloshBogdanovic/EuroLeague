@@ -52,6 +52,8 @@ data/oddspapi_markets_basketball.json
 data/oddspapi_props.json
 data/oddspapi_bet365.json
 data/oddspapi_1xbet.json
+data/oddspapi_22bet.json
+data/oddspapi_stake.json
 data/oddspapi_mozzart*.json
 data/oddspapi_maxbet*.json
 data/oddspapi_superbet*.json

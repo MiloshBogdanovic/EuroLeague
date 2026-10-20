@@ -33,9 +33,12 @@ SPORT_ID_BASKETBALL = 11
 TOURNAMENT_ID_EUROLEAGUE = 138
 
 # Preferred slugs — Mozzart/MaxBet have no player props on OddsPapi; use Superbet.
+# 22bet / stake carry classic player O/U (Over+Under); bet365 is mostly N+ milestones.
 BOOK_BET365 = "bet365"
 BOOK_1XBET = "1xbet"
 BOOK_SUPERBET = "superbet.rs"
+BOOK_22BET = "22bet"
+BOOK_STAKE = "stake"
 BOOK_MOZZART_CANDIDATES = (
     "mozzartbet",
     "maxbet.rs",
@@ -47,9 +50,48 @@ BOOK_MOZZART_CANDIDATES = (
     "mozzart.rs",
 )
 
-DEFAULT_BOOKS = (BOOK_BET365, BOOK_1XBET, BOOK_SUPERBET)
+DEFAULT_BOOKS = (BOOK_BET365, BOOK_1XBET, BOOK_SUPERBET, BOOK_22BET, BOOK_STAKE)
+# Books that often post real Under on playertotals-points (not synth).
+UNDER_CAPABLE_BOOKS = (BOOK_1XBET, BOOK_SUPERBET, BOOK_22BET, BOOK_STAKE)
+# UI picker: slug → (label, short note). Defaults = DEFAULT_BOOKS; extras are opt-in.
+BOOK_CATALOG: dict[str, dict[str, str]] = {
+    BOOK_BET365: {"label": "bet365", "note": "N+ milestones · Over only"},
+    BOOK_1XBET: {"label": "1xBet", "note": "O/U half-lines · Under"},
+    BOOK_SUPERBET: {"label": "Superbet RS", "note": "Milestones + O/U · Under"},
+    BOOK_22BET: {"label": "22bet", "note": "O/U half-lines · Under"},
+    BOOK_STAKE: {"label": "Stake", "note": "Milestones + O/U · Under"},
+    "admiralbet": {"label": "AdmiralBet", "note": "Local scrape · Over + Under"},
+    "pinnacle": {"label": "Pinnacle", "note": "Often empty on EuroLeague"},
+    "unibet": {"label": "Unibet", "note": "Often empty on EuroLeague"},
+    "williamhill": {"label": "William Hill", "note": "Often empty on EuroLeague"},
+    "coolbet": {"label": "Coolbet", "note": "Often empty on EuroLeague"},
+}
 FIXTURE_HORIZON_DAYS = 14
 MAX_FIXTURES_PER_REFRESH = 12
+# RapidAPI /fixtures/odds accepts at most 3 bookmaker slugs per call.
+BOOKS_PER_ODDS_REQUEST = 3
+
+
+def book_label(slug: str) -> str:
+    meta = BOOK_CATALOG.get(slug) or {}
+    return str(meta.get("label") or slug)
+
+
+def book_note(slug: str) -> str:
+    meta = BOOK_CATALOG.get(slug) or {}
+    return str(meta.get("note") or "")
+
+
+def selectable_book_slugs() -> list[str]:
+    """Stable order: defaults first, then catalog extras."""
+    out: list[str] = []
+    for s in DEFAULT_BOOKS:
+        if s not in out:
+            out.append(s)
+    for s in BOOK_CATALOG:
+        if s not in out:
+            out.append(s)
+    return out
 
 # Shown when fixtures load but player ladders are still empty (common days before tip).
 EMPTY_PROPS_NOTE = (
@@ -67,6 +109,8 @@ DEFAULT_PROP_MARKET_HINTS: dict[str, str] = {
 }
 
 FOCUS_MILESTONES = (5, 10, 15, 20, 25, 30, 35)
+# Half-lines that map cleanly to N+ milestones (4.5↔5+, 9.5↔10+, …).
+FOCUS_LINES = tuple(float(n) - 0.5 for n in FOCUS_MILESTONES)
 
 # Direct OddsPapi uses /v4; RapidAPI listing is host-root (see .env.example).
 BASE_URL_DIRECT = "https://api.oddspapi.io/v4"
@@ -85,6 +129,8 @@ PER_BOOK_PATHS = {
     BOOK_BET365: DATA_DIR / "oddspapi_bet365.json",
     BOOK_1XBET: DATA_DIR / "oddspapi_1xbet.json",
     BOOK_SUPERBET: DATA_DIR / "oddspapi_superbet_rs.json",
+    BOOK_22BET: DATA_DIR / "oddspapi_22bet.json",
+    BOOK_STAKE: DATA_DIR / "oddspapi_stake.json",
 }
 
 
@@ -215,18 +261,43 @@ def _milestone_from_text(*parts: object) -> str | None:
     return None
 
 
-def _milestone_from_handicap(handicap: object, outcome_side: str | None) -> str | None:
+def _milestone_from_handicap(handicap: object, outcome_side: str | None = None) -> str | None:
+    """Map half-line handicap to N+ milestone (4.5→5+). Side ignored — used for both O/U."""
+    _ = outcome_side
     try:
         h = float(handicap)
     except (TypeError, ValueError):
         return None
-    side = (outcome_side or "").lower()
-    if "under" in side:
-        return None  # we only keep Over / milestone overs for the board
     if abs(h - int(h) - 0.5) < 1e-6:
         return f"{int(h) + 1}+"
     if abs(h - int(h)) < 1e-6:
         return f"{int(h)}+"
+    return None
+
+
+def _line_to_milestone(line: float) -> str | None:
+    return _milestone_from_handicap(line)
+
+
+def _milestone_to_line(milestone: str) -> float | None:
+    try:
+        n = int(str(milestone).rstrip("+"))
+    except ValueError:
+        return None
+    return float(n) - 0.5
+
+
+def _outcome_side(oname: str | None, *, bookmaker_outcome_id: object = None) -> str | None:
+    blob = f"{oname or ''} {bookmaker_outcome_id or ''}".strip().lower()
+    if not blob:
+        return None
+    if re.search(r"\bunder\b", blob):
+        return "under"
+    if re.search(r"\bover\b", blob):
+        return "over"
+    # Milestone ladders (5+, 10+) are Over-only
+    if re.search(r"\b\d{1,2}\s*\+", blob):
+        return "over"
     return None
 
 
@@ -324,10 +395,11 @@ def resolve_mozzart_slug(bookmakers: list[dict[str, Any]] | None = None) -> str 
 
 def target_book_slugs(*, refresh_catalog: bool = False) -> list[str]:
     """
-    Return up to 3 slugs: bet365, 1xbet, superbet.rs.
+    Default books: bet365 + 1xbet + superbet.rs + 22bet + stake.
 
-    Mozzart/MaxBet are listed by OddsPapi but without player props — Superbet RS
-    is the regional third book that actually carries props on this feed.
+    Mozzart/MaxBet are listed but without player props. 22bet/stake (and often
+    1xbet/superbet) post classic playertotals O/U with real Unders; bet365 is
+    mostly N+ milestone Overs. Odds requests are chunked (max 3 books/call).
     """
     if refresh_catalog or not BOOKS_CACHE_PATH.exists():
         try:
@@ -335,7 +407,7 @@ def target_book_slugs(*, refresh_catalog: bool = False) -> list[str]:
             time.sleep(REQUEST_SLEEP_SEC)
         except Exception:  # noqa: BLE001
             pass
-    return [BOOK_BET365, BOOK_1XBET, BOOK_SUPERBET]
+    return list(DEFAULT_BOOKS)
 
 
 def fetch_markets_basketball(*, force: bool = False) -> dict[str, dict[str, Any]]:
@@ -470,14 +542,67 @@ def _milestone_for_rapid_row(
         ms = _milestone_from_text(oname)
         if ms:
             return ms
-    # Classic O/U player totals: market handicap + Over outcome
+    # Classic O/U player totals: market handicap → N+ (both Over and Under)
     mt = _norm(str((meta or {}).get("marketType") or ""))
     if meta and "playertotals" in mt.replace(" ", ""):
-        side = (oname or "").lower()
-        if "under" in side:
-            return None
-        return _milestone_from_handicap(meta.get("handicap"), side or "over")
+        return _milestone_from_handicap(meta.get("handicap"))
     return _milestone_from_text(oname, row.get("bookmakerOutcomeId"))
+
+
+def _classify_rapid_prop_row(
+    row: dict[str, Any],
+    markets_meta: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    """
+    Parse one RapidAPI odds row into {stat, side, line, milestone, market_family}.
+    Returns None if not a Points player prop we care about.
+    """
+    mid_s = str(row.get("marketId") or "")
+    meta = markets_meta.get(mid_s)
+    mt = _norm(str((meta or {}).get("marketType") or ""))
+    stat = _stat_for_market(meta, mid_s)
+    if stat != "Points":
+        if "point" not in mt:
+            return None
+        stat = "Points"
+    oname = _outcome_name_from_meta(meta, row.get("outcomeId"))
+    side = _outcome_side(oname, bookmaker_outcome_id=row.get("bookmakerOutcomeId"))
+    family = "unknown"
+    line: float | None = None
+    milestone: str | None = None
+
+    if "playertotals" in mt.replace(" ", ""):
+        family = "totals"
+        try:
+            line = float(meta.get("handicap")) if meta and meta.get("handicap") is not None else None
+        except (TypeError, ValueError):
+            line = None
+        if side is None:
+            side = _outcome_side(oname)
+        milestone = _milestone_from_handicap(line) if line is not None else None
+    else:
+        # players-points milestone ladder (5+, 10+, …) — Over only
+        family = "milestone"
+        milestone = _milestone_for_rapid_row(row, markets_meta)
+        if milestone:
+            line = _milestone_to_line(milestone)
+            side = side or "over"
+
+    if side not in ("over", "under"):
+        return None
+    if family == "milestone" and side == "under":
+        return None
+    if line is None and milestone is None:
+        return None
+    return {
+        "stat": stat,
+        "side": side,
+        "line": line,
+        "milestone": milestone,
+        "market_family": family,
+        "market_id": mid_s,
+        "market_type": (meta or {}).get("marketType"),
+    }
 
 
 def fetch_euroleague_fixtures() -> list[dict[str, Any]]:
@@ -524,14 +649,39 @@ def select_fixtures_for_refresh(
 
 
 def fetch_fixture_odds(fixture_id: str, book_slugs: list[str]) -> dict[str, Any]:
-    """GET /fixtures/odds — RapidAPI nested odds-by-book shape."""
-    return _get(
-        "/fixtures/odds",
-        {
-            "fixtureId": fixture_id,
-            "bookmakers": ",".join(book_slugs[:3]),
-        },
-    )
+    """
+    GET /fixtures/odds — RapidAPI nested odds-by-book shape.
+
+    API allows at most 3 bookmakers per call; we chunk and merge when needed.
+    """
+    slugs = [s for s in book_slugs if s]
+    if not slugs:
+        return {"odds": {}}
+    chunks = [
+        slugs[i : i + BOOKS_PER_ODDS_REQUEST]
+        for i in range(0, len(slugs), BOOKS_PER_ODDS_REQUEST)
+    ]
+    merged: dict[str, Any] = {"odds": {}, "fixtureId": fixture_id}
+    for i, chunk in enumerate(chunks):
+        payload = _get(
+            "/fixtures/odds",
+            {
+                "fixtureId": fixture_id,
+                "bookmakers": ",".join(chunk),
+            },
+        )
+        if not isinstance(payload, dict):
+            continue
+        if i == 0:
+            for k, v in payload.items():
+                if k != "odds":
+                    merged[k] = v
+        odds = payload.get("odds") or {}
+        if isinstance(odds, dict):
+            merged.setdefault("odds", {}).update(odds)
+        if i + 1 < len(chunks):
+            time.sleep(REQUEST_SLEEP_SEC)
+    return merged
 
 
 def resolve_player_names(player_ids: list[int | str]) -> dict[str, str]:
@@ -566,6 +716,91 @@ def resolve_player_names(player_ids: list[int | str]) -> dict[str, str]:
     return out
 
 
+def _pair_side_quotes(side_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Collapse Over/Under quotes for the same (book, player, line) into one row.
+    """
+    buckets: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for r in side_rows:
+        line = r.get("line")
+        try:
+            line_f = float(line) if line is not None else None
+        except (TypeError, ValueError):
+            line_f = None
+        key = (r.get("book"), r.get("player_id"), r.get("player"), line_f, r.get("milestone"))
+        b = buckets.get(key)
+        if b is None:
+            b = {
+                "book": r.get("book"),
+                "player": r.get("player"),
+                "player_id": r.get("player_id"),
+                "team": r.get("team"),
+                "team_hint": r.get("team_hint"),
+                "market": r.get("market") or "Points",
+                "milestone": r.get("milestone"),
+                "line": line_f,
+                "over_odds": None,
+                "under_odds": None,
+                "fixture_id": r.get("fixture_id"),
+                "event": r.get("event"),
+                "tip_off": r.get("tip_off"),
+                "home": r.get("home"),
+                "away": r.get("away"),
+                "market_id": r.get("market_id"),
+                "market_family": r.get("market_family"),
+                "main_line": bool(r.get("main_line")),
+                "has_real_under": False,
+            }
+            buckets[key] = b
+        side = r.get("side")
+        price = r.get("price")
+        try:
+            price_f = float(price) if price is not None else None
+        except (TypeError, ValueError):
+            price_f = None
+        if price_f is None:
+            continue
+        if side == "over":
+            prev = b.get("over_odds")
+            if prev is None or price_f < float(prev):
+                b["over_odds"] = round(price_f, 3)
+            b["main_line"] = b["main_line"] or bool(r.get("main_line"))
+            if r.get("market_id"):
+                b["market_id"] = r.get("market_id")
+            if r.get("market_family"):
+                b["market_family"] = r.get("market_family")
+        elif side == "under":
+            prev = b.get("under_odds")
+            if prev is None or price_f < float(prev):
+                b["under_odds"] = round(price_f, 3)
+            b["has_real_under"] = True
+            b["main_line"] = b["main_line"] or bool(r.get("main_line"))
+    return [b for b in buckets.values() if b.get("over_odds") is not None or b.get("under_odds") is not None]
+
+
+def _keep_prop_row(row: dict[str, Any]) -> bool:
+    """Keep focus milestones/lines, any real O/U under, or main-line totals."""
+    ms = row.get("milestone")
+    if ms:
+        try:
+            if int(str(ms).rstrip("+")) in FOCUS_MILESTONES:
+                return True
+        except ValueError:
+            pass
+    line = row.get("line")
+    try:
+        line_f = float(line) if line is not None else None
+    except (TypeError, ValueError):
+        line_f = None
+    if line_f is not None and any(abs(line_f - fl) < 1e-6 for fl in FOCUS_LINES):
+        return True
+    if row.get("has_real_under") and row.get("under_odds") is not None:
+        return True
+    if row.get("market_family") == "totals" and row.get("main_line"):
+        return True
+    return False
+
+
 def extract_rows_from_fixture(
     fixture: dict[str, Any],
     *,
@@ -574,16 +809,17 @@ def extract_rows_from_fixture(
     player_names: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Flatten player-prop Over/milestone prices.
+    Flatten player-prop Over / Under / milestone prices.
 
     Supports RapidAPI nested `odds[book][oddsId]` and legacy v4 `bookmakerOdds`.
+    Classic playertotals-points yield real Under; milestone ladders are Over-only.
     """
-    rows: list[dict[str, Any]] = []
     home, away = _fixture_participants(fixture)
     event = f"{home} vs {away}".strip(" vs")
     tip = _fixture_start_iso(fixture)
     fid = fixture.get("fixtureId")
     player_names = player_names or {}
+    side_rows: list[dict[str, Any]] = []
 
     # RapidAPI: odds nested by book
     rapid_odds = fixture.get("odds")
@@ -598,23 +834,8 @@ def extract_rows_from_fixture(
                 pid = int(row.get("playerId") or 0)
                 if pid == 0:
                     continue
-                mid_s = str(row.get("marketId") or "")
-                meta = markets_meta.get(mid_s)
-                stat = _stat_for_market(meta, mid_s)
-                if stat != "Points":
-                    # Still accept players-points / playertotals-points by type
-                    mt = _norm(str((meta or {}).get("marketType") or ""))
-                    if "point" not in mt:
-                        continue
-                    stat = "Points"
-                milestone = _milestone_for_rapid_row(row, markets_meta)
-                if not milestone:
-                    continue
-                try:
-                    n = int(milestone.rstrip("+"))
-                except ValueError:
-                    continue
-                if n not in FOCUS_MILESTONES:
+                parsed = _classify_rapid_prop_row(row, markets_meta)
+                if not parsed:
                     continue
                 price = row.get("price")
                 try:
@@ -622,7 +843,7 @@ def extract_rows_from_fixture(
                 except (TypeError, ValueError):
                     continue
                 pname = player_names.get(str(pid)) or row.get("playerName")
-                rows.append(
+                side_rows.append(
                     {
                         "book": book,
                         "player": pname or f"player:{pid}",
@@ -630,21 +851,22 @@ def extract_rows_from_fixture(
                         "team": None,
                         "team_hint": None,
                         "market": "Points",
-                        "milestone": milestone,
-                        "line": float(n) - 0.5,
-                        "over_odds": price_f,
-                        "under_odds": None,
+                        "milestone": parsed.get("milestone"),
+                        "line": parsed.get("line"),
+                        "side": parsed.get("side"),
+                        "price": price_f,
                         "fixture_id": fid,
                         "event": event,
                         "tip_off": tip,
                         "home": home,
                         "away": away,
-                        "market_id": mid_s,
-                        "outcome_id": row.get("outcomeId"),
+                        "market_id": parsed.get("market_id"),
+                        "market_family": parsed.get("market_family"),
                         "main_line": bool(row.get("mainLine")),
                     }
                 )
-        return rows
+        paired = _pair_side_quotes(side_rows)
+        return [r for r in paired if _keep_prop_row(r)]
 
     # Legacy v4 bookmakerOdds shape
     bookmaker_odds = fixture.get("bookmakerOdds") or {}
@@ -662,48 +884,74 @@ def extract_rows_from_fixture(
             if stat != "Points":
                 continue
             handicap = (meta or {}).get("handicap")
+            mt = _norm(str((meta or {}).get("marketType") or ""))
+            family = "totals" if "playertotals" in mt.replace(" ", "") else "milestone"
             for oid, pname, price, price_obj in _iter_player_prices(mblock):
-                side = _outcome_side_label(meta, oid, price_obj)
-                if "under" in side.lower() and "+" not in side:
-                    continue
-                milestone = _milestone_from_text(side, price_obj.get("bookmakerOutcomeId"))
+                side_label = _outcome_side_label(meta, oid, price_obj)
+                side = _outcome_side(side_label, bookmaker_outcome_id=price_obj.get("bookmakerOutcomeId"))
+                milestone = _milestone_from_text(side_label, price_obj.get("bookmakerOutcomeId"))
+                line = None
                 if milestone is None and handicap is not None:
-                    milestone = _milestone_from_handicap(handicap, side)
-                if milestone is None:
+                    milestone = _milestone_from_handicap(handicap)
+                    try:
+                        line = float(handicap)
+                    except (TypeError, ValueError):
+                        line = None
+                    family = "totals"
+                if milestone and line is None:
+                    line = _milestone_to_line(milestone)
+                if side is None:
                     continue
-                try:
-                    n = int(milestone.rstrip("+"))
-                except ValueError:
+                if family == "milestone" and side == "under":
                     continue
-                if n not in FOCUS_MILESTONES:
+                if milestone is None and line is None:
                     continue
-                rows.append(
+                side_rows.append(
                     {
                         "book": book,
                         "player": pname or f"player:{price_obj.get('bookmakerOutcomeId') or oid}",
+                        "player_id": None,
                         "team": None,
                         "team_hint": None,
                         "market": "Points",
                         "milestone": milestone,
-                        "line": float(n) - 0.5,
-                        "over_odds": price,
-                        "under_odds": None,
+                        "line": line,
+                        "side": side,
+                        "price": price,
                         "fixture_id": fid,
                         "event": event,
                         "tip_off": tip,
                         "home": home,
                         "away": away,
                         "market_id": mid_s,
-                        "outcome_id": oid,
+                        "market_family": family,
                         "main_line": bool(price_obj.get("mainLine")),
                     }
                 )
-    return rows
+    paired = _pair_side_quotes(side_rows)
+    return [r for r in paired if _keep_prop_row(r)]
+
+
+def _line_key(line: float | None) -> str | None:
+    if line is None:
+        return None
+    try:
+        f = float(line)
+    except (TypeError, ValueError):
+        return None
+    if abs(f - int(f)) < 1e-6:
+        return str(int(f))
+    return f"{f:g}"
 
 
 def _rows_to_board(rows: list[dict[str, Any]], *, points_only: bool = True) -> dict[str, Any]:
     """
     Build unified multi-book board + Bet365-primary legacy games[] shape.
+
+    Per player:
+      odds_by_book[book][milestone] = over float   (Market cut compatible)
+      under_by_book[book][milestone] = under float  (when real Under exists)
+      ou_by_book[book][line] = {over, under, milestone, has_real_under}
     """
     use = [r for r in rows if (not points_only or r.get("market") == "Points")]
     # Drop nameless placeholders
@@ -723,18 +971,57 @@ def _rows_to_board(rows: list[dict[str, Any]], *, points_only: bool = True) -> d
         )
         pname = str(r["player"])
         book = str(r["book"])
-        ms = str(r["milestone"])
+        ms = str(r["milestone"]) if r.get("milestone") else None
+        line = r.get("line")
+        if line is None and ms:
+            line = _milestone_to_line(ms)
+        if ms is None and line is not None:
+            ms = _line_to_milestone(float(line))
         p = g["players_map"].setdefault(
             _norm(pname),
-            {"player": pname, "team_hint": r.get("team_hint"), "odds_by_book": {}},
+            {
+                "player": pname,
+                "team_hint": r.get("team_hint"),
+                "odds_by_book": {},
+                "under_by_book": {},
+                "ou_by_book": {},
+            },
         )
         if r.get("team_hint") and not p.get("team_hint"):
             p["team_hint"] = r["team_hint"]
-        book_odds = p["odds_by_book"].setdefault(book, {})
-        # Prefer shorter (more likely main) price if duplicate
-        prev = book_odds.get(ms)
-        if prev is None or float(r["over_odds"]) < float(prev):
-            book_odds[ms] = round(float(r["over_odds"]), 3)
+
+        over = r.get("over_odds")
+        under = r.get("under_odds")
+        if ms and over is not None:
+            book_odds = p["odds_by_book"].setdefault(book, {})
+            prev = book_odds.get(ms)
+            if prev is None or float(over) < float(prev):
+                book_odds[ms] = round(float(over), 3)
+        if ms and under is not None:
+            book_under = p["under_by_book"].setdefault(book, {})
+            prev_u = book_under.get(ms)
+            if prev_u is None or float(under) < float(prev_u):
+                book_under[ms] = round(float(under), 3)
+
+        lk = _line_key(float(line) if line is not None else None)
+        if lk is not None:
+            ou_book = p["ou_by_book"].setdefault(book, {})
+            cell = ou_book.get(lk) or {
+                "over": None,
+                "under": None,
+                "milestone": ms,
+                "has_real_under": False,
+            }
+            if over is not None and (cell["over"] is None or float(over) < float(cell["over"])):
+                cell["over"] = round(float(over), 3)
+            if under is not None and (cell["under"] is None or float(under) < float(cell["under"])):
+                cell["under"] = round(float(under), 3)
+                cell["has_real_under"] = True
+            if ms and not cell.get("milestone"):
+                cell["milestone"] = ms
+            if r.get("has_real_under"):
+                cell["has_real_under"] = True
+            ou_book[lk] = cell
 
     games: list[dict[str, Any]] = []
     for g in games_map.values():
@@ -752,6 +1039,8 @@ def _rows_to_board(rows: list[dict[str, Any]], *, points_only: bool = True) -> d
                     "team_hint": p.get("team_hint"),
                     "odds": odds,
                     "odds_by_book": p["odds_by_book"],
+                    "under_by_book": p.get("under_by_book") or {},
+                    "ou_by_book": p.get("ou_by_book") or {},
                 }
             )
         players.sort(key=lambda x: _norm(x["player"]))
@@ -782,13 +1071,17 @@ def _split_per_book(unified: dict[str, Any], book_slugs: list[str]) -> dict[str,
             players = []
             for p in g.get("players") or []:
                 odds = (p.get("odds_by_book") or {}).get(book) or {}
-                if not odds:
+                under = (p.get("under_by_book") or {}).get(book) or {}
+                ou = (p.get("ou_by_book") or {}).get(book) or {}
+                if not odds and not under and not ou:
                     continue
                 players.append(
                     {
                         "player": p.get("player"),
                         "team_hint": p.get("team_hint"),
                         "odds": odds,
+                        "under": under,
+                        "ou": ou,
                     }
                 )
             if players:
@@ -828,9 +1121,10 @@ def refresh_euroleague_props(
     """
     Pull EuroLeague player props via RapidAPI:
       1) GET /fixtures?tournamentId=138
-      2) GET /fixtures/odds per near-term fixture (bet365,1xbet,superbet.rs)
+      2) GET /fixtures/odds per near-term fixture (chunked, ≤3 books/call)
       3) GET /players for name resolution
 
+    Default books: bet365, 1xbet, superbet.rs, 22bet, stake.
     Mozzart/MaxBet are skipped (no player props on this feed).
     """
     ok, reason = api_ready()
@@ -917,11 +1211,18 @@ def refresh_euroleague_props(
     unified["fixture_count"] = len(merged_fixtures)
     unified["fixtures_available"] = len(all_fixtures)
     n_players = sum(len(g.get("players") or []) for g in (unified.get("games") or []))
+    n_with_under = sum(1 for r in all_rows if r.get("under_odds") is not None)
+    books_with_under = sorted(
+        {str(r.get("book")) for r in all_rows if r.get("under_odds") is not None and r.get("book")}
+    )
     unified["note"] = (
         "RapidAPI /fixtures + /fixtures/odds. "
-        "Books: bet365, 1xbet, superbet.rs "
+        f"Books: {', '.join(slugs)}. "
+        "bet365 ≈ N+ milestones (Over); "
+        "1xbet / superbet.rs / 22bet / stake often post playertotals Over+Under. "
         "(Mozzart/MaxBet have no player props on OddsPapi)."
     )
+    unified["under_capable_books"] = [b for b in slugs if b in UNDER_CAPABLE_BOOKS]
     if merged_fixtures and n_players == 0:
         unified["empty_props_note"] = EMPTY_PROPS_NOTE
         unified["note"] = f"{unified['note']} {EMPTY_PROPS_NOTE}"
@@ -932,6 +1233,8 @@ def refresh_euroleague_props(
         "players": n_players,
         "books": slugs,
         "raw_prop_rows": len(all_rows),
+        "rows_with_under": n_with_under,
+        "books_with_under": books_with_under,
         "fixtures_fetched": len(merged_fixtures),
         "fixtures_available": len(all_fixtures),
         "points_players": n_players,
@@ -945,6 +1248,7 @@ def refresh_euroleague_props(
         "fetched_at": unified["fetched_at"],
         "source": "oddspapi",
         "books": slugs,
+        "under_capable_books": unified.get("under_capable_books"),
         "note": unified["note"],
         "empty_props_note": unified.get("empty_props_note"),
         "games": unified["games"],
@@ -1011,6 +1315,158 @@ def load_oddspapi_meta() -> dict[str, Any]:
         },
         "path": board.get("path"),
     }
+
+
+def _milestone_sort_key(ms: str) -> int:
+    try:
+        return int(str(ms).rstrip("+"))
+    except ValueError:
+        return 999
+
+
+def board_books(board: dict[str, Any] | None = None) -> list[str]:
+    """Stable book order: preferred defaults first, then any extras on the board."""
+    board = board or load_oddspapi_board()
+    found: set[str] = set()
+    for b in board.get("books") or []:
+        if b:
+            found.add(str(b))
+    for g in board.get("games") or []:
+        for p in g.get("players") or []:
+            for b in (p.get("odds_by_book") or {}):
+                found.add(str(b))
+    ordered: list[str] = []
+    for b in DEFAULT_BOOKS:
+        if b in found:
+            ordered.append(b)
+            found.discard(b)
+    ordered.extend(sorted(found))
+    return ordered
+
+
+def odds_by_book_rows(board: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """
+    Flatten board into one row per player × line with Over/Under per book.
+
+    Columns: event, tip_off, player, team_hint, line, milestone,
+             <book>_over, <book>_under, ..., best_over_book, best_under_book,
+             has_real_under
+    Also keeps legacy <book> = over for callers that still expect it.
+    """
+    board = board or load_oddspapi_board()
+    books = board_books(board)
+    rows: list[dict[str, Any]] = []
+    for g in board.get("games") or []:
+        event = g.get("event") or ""
+        tip = g.get("tip_off")
+        for p in g.get("players") or []:
+            by_book = p.get("odds_by_book") or {}
+            under_by = p.get("under_by_book") or {}
+            ou_by = p.get("ou_by_book") or {}
+
+            # Union of line keys from ou_by_book + milestones mapped to lines
+            line_meta: dict[str, dict[str, Any]] = {}
+            for book, ou_map in ou_by.items():
+                if not isinstance(ou_map, dict):
+                    continue
+                for lk, cell in ou_map.items():
+                    if not isinstance(cell, dict):
+                        continue
+                    meta = line_meta.setdefault(
+                        str(lk),
+                        {"line": float(lk), "milestone": cell.get("milestone"), "has_real_under": False},
+                    )
+                    if cell.get("milestone") and not meta.get("milestone"):
+                        meta["milestone"] = cell.get("milestone")
+                    if cell.get("has_real_under") or cell.get("under") is not None:
+                        meta["has_real_under"] = True
+
+            milestones: set[str] = set()
+            for b_odds in by_book.values():
+                if isinstance(b_odds, dict):
+                    milestones.update(str(k) for k in b_odds)
+            for b_under in under_by.values():
+                if isinstance(b_under, dict):
+                    milestones.update(str(k) for k in b_under)
+            if not milestones and p.get("odds"):
+                milestones.update(str(k) for k in (p.get("odds") or {}))
+            for ms in milestones:
+                line = _milestone_to_line(ms)
+                if line is None:
+                    continue
+                lk = _line_key(line)
+                if not lk:
+                    continue
+                meta = line_meta.setdefault(
+                    lk, {"line": line, "milestone": ms, "has_real_under": False}
+                )
+                if not meta.get("milestone"):
+                    meta["milestone"] = ms
+
+            for lk, meta in sorted(line_meta.items(), key=lambda kv: float(kv[0])):
+                ms = meta.get("milestone")
+                row: dict[str, Any] = {
+                    "event": event,
+                    "tip_off": tip,
+                    "player": p.get("player"),
+                    "team_hint": p.get("team_hint"),
+                    "line": meta.get("line"),
+                    "milestone": ms,
+                    "has_real_under": bool(meta.get("has_real_under")),
+                }
+                overs: list[tuple[str, float]] = []
+                unders: list[tuple[str, float]] = []
+                for book in books:
+                    cell = (ou_by.get(book) or {}).get(lk) if isinstance(ou_by.get(book), dict) else None
+                    over = cell.get("over") if isinstance(cell, dict) else None
+                    under = cell.get("under") if isinstance(cell, dict) else None
+                    if over is None and ms:
+                        raw = (by_book.get(book) or {}).get(ms)
+                        if raw is None and book == BOOK_BET365 and (p.get("odds") or {}).get(ms) is not None:
+                            raw = (p.get("odds") or {}).get(ms)
+                        over = raw
+                    if under is None and ms:
+                        under = (under_by.get(book) or {}).get(ms)
+                    over_f = round(float(over), 3) if over is not None else None
+                    under_f = round(float(under), 3) if under is not None else None
+                    row[f"{book}_over"] = over_f
+                    row[f"{book}_under"] = under_f
+                    row[book] = over_f  # legacy alias
+                    if over_f is not None:
+                        overs.append((book, over_f))
+                    if under_f is not None:
+                        unders.append((book, under_f))
+                        row["has_real_under"] = True
+                if overs:
+                    best_book, best_over = min(overs, key=lambda t: t[1])
+                    row["best_over_book"] = best_book
+                    row["best_over"] = best_over
+                    row["best_book"] = best_book  # legacy
+                else:
+                    row["best_over_book"] = None
+                    row["best_over"] = None
+                    row["best_book"] = None
+                if unders:
+                    # Longer under decimal = shorter under probability; pick longest under? 
+                    # For value hunting, higher under price is better for betting Under.
+                    # For "shortest price" parity with over, use min.
+                    best_u_book, best_under = min(unders, key=lambda t: t[1])
+                    row["best_under_book"] = best_u_book
+                    row["best_under"] = best_under
+                else:
+                    row["best_under_book"] = None
+                    row["best_under"] = None
+                if any(row.get(f"{b}_over") is not None or row.get(f"{b}_under") is not None for b in books):
+                    rows.append(row)
+    rows.sort(
+        key=lambda r: (
+            str(r.get("tip_off") or ""),
+            str(r.get("event") or ""),
+            _norm(str(r.get("player") or "")),
+            float(r.get("line") or 999),
+        )
+    )
+    return rows
 
 
 def validate_catalog() -> dict[str, Any]:

@@ -26,10 +26,12 @@ from euro_admiralbet import (
     playwright_ready,
 )
 from euro_market_compare import (
+    BOOK_ADMIRAL,
     COMPARE_PATH,
     DEFAULT_B365_MARGIN,
     DEFAULT_CLOSE_LINE_TOL,
     MASSIVE_UNDERCUT,
+    available_compare_books,
     board_player_summary,
     build_comparison,
     comparison_cache_is_fresh,
@@ -40,9 +42,17 @@ from euro_market_compare import (
     save_comparison,
 )
 from euro_oddspapi import (
+    DEFAULT_BOOKS,
+    UNDER_CAPABLE_BOOKS,
     api_ready as oddspapi_ready,
+    book_label,
+    book_note,
+    board_books,
+    load_oddspapi_board,
     load_oddspapi_meta,
+    odds_by_book_rows,
     refresh_euroleague_props,
+    selectable_book_slugs,
 )
 from euro_utils import (
     DATA_DIR,
@@ -793,32 +803,26 @@ def render_h2h_block(season: int, team_code: str, our_form: pd.DataFrame) -> Non
 
 
 def render_market_cut_page() -> None:
-    """Milestone N+ (OddsPapi / Bet365) vs Admiral half-lines + synth Under."""
+    """Primary book vs other books (incl. Admiral) on same / close Points lines."""
     st.title("Market cut")
     st.caption(
-        "Points milestones (5+ / 10+ / 15+ / 20+) from OddsPapi "
-        "(bet365 · 1xBet · Superbet RS) vs Admiral Over "
-        "(4.5 / 9.5 / 14.5 / 19.5). Screenshot board is fallback only."
+        "Pick a **primary** bookmaker, then compare its Points Over/Under to every "
+        "other selected book on the **same line** or within your **close-line ±** "
+        "tolerance. AdmiralBet scrape is available as `admiralbet`."
     )
-    with st.expander("How the margin (cut) slider works", expanded=False):
+    with st.expander("How gaps work", expanded=False):
         st.markdown(
-            """
-Milestone books usually sell only the **Over** (N+). There is often no Under,
-so we invent one so you can see both sides next to Admiral.
+            f"""
+**Over gap** = primary Over − other Over  
+(negative = primary is *shorter* / undercutting the other book)
 
-**Slider = assumed overround** on the primary (bet365) Over (default **10%**):
+**Under gap** = other Under − primary Under  
+(primary Under = real price when present, else synth from the margin slider)
 
-`1 / Over + 1 / Synth_Under = 1 + margin`
+**Close line ±** = max |other_line − primary_line| still treated as a pair  
+(e.g. primary 14.5 vs other 15.5 when ± ≥ 1.0)
 
-Example at 10% with Over **1.64**:
-- implied Over ≈ 61.0%
-- leftover for Under ≈ 1.10 − 0.61 = 49.0% → synth Under ≈ **2.04**
-
-**What the slider changes**
-- `b365_synth_under` and **`under_gap (AdmU − synthU)`**
-
-**What it does not change**
-- Real Over prices from any book, **`over_gap (B365 − Adm)`**, or undercut flags.
+🔴 MASSIVE when over gap ≤ {MASSIVE_UNDERCUT:.2f}.
 """
         )
 
@@ -826,129 +830,169 @@ Example at 10% with Over **1.64**:
     games = board.get("games") or []
     players = board_player_summary(board)
     src_label = board.get("source") or "screenshot"
-    books_label = ", ".join(board.get("books") or []) or "bet365 (legacy)"
+    book_opts = available_compare_books(board, include_admiral=True)
+    if not book_opts:
+        book_opts = list(DEFAULT_BOOKS)
 
-    c1, c2, c3, c4 = st.columns([1, 1, 1, 1.5])
+    default_primary = "bet365" if "bet365" in book_opts else book_opts[0]
+    c1, c2, c3 = st.columns([1.2, 1.8, 1.2])
     with c1:
+        primary = st.selectbox(
+            "Primary book",
+            options=book_opts,
+            index=book_opts.index(default_primary) if default_primary in book_opts else 0,
+            format_func=lambda s: (
+                f"{book_label(s)} (scrape)" if s == BOOK_ADMIRAL else f"{book_label(s)} ({s})"
+            ),
+            key="market_cut_primary",
+            help="Anchor book — every other selected book is compared to this one.",
+        )
+    with c2:
+        other_opts = [b for b in book_opts if b != primary]
+        default_others = [b for b in other_opts if b != primary]
+        compare_books = st.multiselect(
+            "Compare against",
+            options=other_opts,
+            default=default_others,
+            format_func=lambda s: (
+                f"{book_label(s)} (scrape)" if s == BOOK_ADMIRAL else f"{book_label(s)} ({s})"
+            ),
+            key="market_cut_compare_books",
+            help="OddsPapi books + optional AdmiralBet scrape.",
+        )
+    with c3:
+        close_tol = st.slider(
+            "Close line ± points",
+            min_value=0.0,
+            max_value=3.0,
+            value=float(st.session_state.get("close_line_tol", DEFAULT_CLOSE_LINE_TOL)),
+            step=0.5,
+            key="close_line_tol",
+            help="0 = exact lines only for the close table; exact table always requires equal lines.",
+        )
+
+    c4, c5, c6 = st.columns([1, 1, 1.5])
+    with c4:
         margin_pct = st.slider(
-            "Bet365 margin (cut) %",
+            "Synth Under margin %",
             min_value=5,
             max_value=15,
             value=int(st.session_state.get("b365_margin_pct", DEFAULT_B365_MARGIN * 100)),
             step=1,
             key="b365_margin_pct",
+            help="Only used when the primary book has Over but no real Under.",
         )
-    with c2:
-        close_tol = st.slider(
-            "Close line ±",
-            min_value=0.5,
-            max_value=2.0,
-            value=float(st.session_state.get("close_line_tol", DEFAULT_CLOSE_LINE_TOL)),
-            step=0.5,
-            key="close_line_tol",
-            help="2nd table: |Admiral line − Bet365 half-line| ≤ this (e.g. 15.5 vs 14.5).",
-        )
-    with c3:
+    with c5:
         rebuild = st.button("Rebuild comparison", type="primary", use_container_width=True)
-    with c4:
+    with c6:
         st.caption(
-            f"Source: **{src_label}** ({books_label}) · "
-            f"**{len(games)}** games · **{len(players)}** players · "
-            f"`{COMPARE_PATH.name}`"
+            f"Source: **{src_label}** · **{len(games)}** games · "
+            f"**{len(players)}** players · `{COMPARE_PATH.name}`"
         )
 
+    if not compare_books:
+        st.warning("Select at least one bookmaker to compare against.")
+        return
+
     margin = margin_pct / 100.0
-    cmp_payload = None
-    # Cloud can keep a stale gitignored market_value_compare.json across deploys.
-    # Always rebuild unless an explicit cache is proven fresh vs live sources.
+    include_admiral = BOOK_ADMIRAL in compare_books or primary == BOOK_ADMIRAL
     cached = None if rebuild else load_comparison()
     need_rebuild = rebuild or not comparison_cache_is_fresh(
-        cached, margin=margin, close_tol=close_tol
+        cached,
+        margin=margin,
+        close_tol=close_tol,
+        primary_book=primary,
+        compare_books=compare_books,
     )
+    cmp_payload = None
     if need_rebuild:
         try:
-            cmp_payload = save_comparison(margin=margin, close_tol=close_tol)
+            cmp_payload = save_comparison(
+                primary_book=primary,
+                compare_books=compare_books,
+                margin=margin,
+                close_tol=close_tol,
+                include_admiral=include_admiral,
+            )
             if cmp_payload.get("save_error"):
-                st.caption(f"Compare built in-memory (could not write cache: {cmp_payload['save_error']})")
+                st.caption(
+                    f"Compare built in-memory (could not write cache: {cmp_payload['save_error']})"
+                )
         except Exception as exc:  # noqa: BLE001
             ui_log(f"Market compare failed: {exc}\n{traceback.format_exc()}", "error")
             st.error(f"Compare failed: {exc}")
             try:
-                cmp_payload = build_comparison(margin=margin, close_tol=close_tol)
+                cmp_payload = build_comparison(
+                    primary_book=primary,
+                    compare_books=compare_books,
+                    margin=margin,
+                    close_tol=close_tol,
+                    include_admiral=include_admiral,
+                )
             except Exception:  # noqa: BLE001
                 cmp_payload = None
     else:
         cmp_payload = cached
 
     event_opts = ["All games"] + [g.get("event") or f"Game {i+1}" for i, g in enumerate(games)]
-    pick = st.selectbox("Filter by game", options=event_opts, key="market_cut_game")
+    f1, f2 = st.columns([2, 1.2])
+    with f1:
+        pick = st.selectbox("Filter by game", options=event_opts, key="market_cut_game")
+    with f2:
+        other_filter = st.selectbox(
+            "Filter by other book",
+            options=["All books"] + compare_books,
+            format_func=lambda s: book_label(s) if s != "All books" else s,
+            key="market_cut_other_filter",
+        )
 
-    st.subheader("Input players (props board)")
-    if not players:
-        op_meta = load_oddspapi_meta()
-        if op_meta.get("fetched_at") and (op_meta.get("summary") or {}).get("fixtures_fetched"):
-            st.info(
-                op_meta.get("empty_props_note")
-                or (
-                    "Fixtures loaded, but player props are not out yet. "
-                    "Re-refresh closer to tip-off / gameday to continue testing."
-                )
-            )
+    with st.expander("Input players (props board)", expanded=False):
+        if not players:
+            op_meta = load_oddspapi_meta()
+            if op_meta.get("fetched_at") and (op_meta.get("summary") or {}).get("fixtures_fetched"):
+                st.info(op_meta.get("empty_props_note") or "Fixtures loaded, props not out yet.")
+            else:
+                st.warning("No players on the OddsPapi board — refresh from the sidebar.")
         else:
-            st.warning(
-                f"No players in `{board.get('path') or 'data/oddspapi_points_board.json'}`. "
-                "Refresh OddsPapi props from the sidebar (needs `ODDSPAPI_API_KEY`)."
-            )
-    else:
-        show = players if pick == "All games" else [p for p in players if p.get("event") == pick]
-        st.dataframe(pd.DataFrame(show), use_container_width=True, hide_index=True)
+            show = players if pick == "All games" else [p for p in players if p.get("event") == pick]
+            st.dataframe(pd.DataFrame(show), width="stretch", hide_index=True)
 
     if not cmp_payload:
         return
 
     summ = cmp_payload.get("summary") or {}
-    over_col = "over_gap (B365−Adm)"
-    under_col = "under_gap (AdmU−synthU)"
+    primary_label = cmp_payload.get("primary_book") or primary
+    over_col = f"over_gap ({primary_label}-other)"
+    under_col = "under_gap (otherU-primaryU)"
 
-    books_used = cmp_payload.get("board_books") or summ.get("books") or []
     st.caption(
-        f"Sources → **{cmp_payload.get('board_source') or src_label}** "
-        f"({', '.join(books_used) if books_used else '—'}) · "
-        f"players **{summ.get('input_players', 0)}** · "
+        f"**{book_label(primary_label)}** vs "
+        f"{', '.join(book_label(b) for b in (cmp_payload.get('compare_books') or compare_books))} · "
         f"exact **{summ.get('exact_half_line_matches', 0)}** · "
         f"close **{summ.get('close_line_matches', 0)}** · "
         f"far **{summ.get('far_nearest', 0)}** · "
         f"OddsPapi `{cmp_payload.get('oddspapi_fetched_at') or '—'}` · "
         f"Admiral `{cmp_payload.get('admiral_fetched_at') or '—'}`"
     )
-    # Guard: zero overlaps after rebuild (wrong gameday or name mismatch)
+
     if (
         int(summ.get("exact_half_line_matches") or 0) == 0
         and int(summ.get("close_line_matches") or 0) == 0
-        and int(summ.get("far_nearest") or 0) == 0
     ):
-        adm_meta = load_admiralbet_lines()
-        adm_teams = sorted(
-            {
-                str(r.get("team") or "")
-                for r in (adm_meta.get("lines") or [])
-                if r.get("market") == "Points" and r.get("team")
-            }
-        )
-        b365_hints = sorted(
-            {str(p.get("team_hint") or "") for p in players if p.get("team_hint")}
-        )
         st.warning(
-            "No player overlaps after rebuild. "
-            f"Admiral fetched {adm_meta.get('fetched_at') or '—'}. "
-            f"Bet365 teams: {', '.join(b365_hints) or '—'}. "
-            f"Admiral PTS teams: {', '.join(adm_teams) or '—'}."
+            "No same/close line overlaps. Try a wider close-line ±, another primary book, "
+            "or refresh OddsPapi / Admiral from the sidebar."
         )
 
-    def _filter_game(df: pd.DataFrame) -> pd.DataFrame:
-        if pick == "All games" or df.empty or "event" not in df.columns:
+    def _filter_view(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
             return df
-        return df[df["event"] == pick].reset_index(drop=True)
+        out = df
+        if pick != "All games" and "event" in out.columns:
+            out = out[out["event"] == pick]
+        if other_filter != "All books" and "other_book" in out.columns:
+            out = out[out["other_book"] == other_filter]
+        return out.reset_index(drop=True)
 
     def _gap_metrics(df: pd.DataFrame, title: str) -> None:
         if df.empty:
@@ -961,12 +1005,13 @@ Example at 10% with Over **1.64**:
             m1.metric(
                 "Biggest Over undercut",
                 f"{r_over[over_col]:+.3f}",
-                delta=f"{r_over.get('player', '')} {r_over.get('milestone', '')}",
+                delta=f"{r_over.get('player', '')} vs {r_over.get('other_book', '')}",
                 delta_color="off",
             )
+            p_over_col = f"{primary_label}_over"
             m2.metric(
-                "B365 Over vs Adm Over",
-                f"{r_over.get('b365_over', '—')} vs {r_over.get('adm_over', '—')}",
+                "Primary O vs other O",
+                f"{r_over.get(p_over_col, '—')} vs {r_over.get('other_over', '—')}",
             )
         if under_col in df.columns and df[under_col].notna().any():
             i_under = df[under_col].abs().idxmax()
@@ -974,67 +1019,351 @@ Example at 10% with Over **1.64**:
             m3.metric(
                 "Largest |Under gap|",
                 f"{r_under[under_col]:+.3f}",
-                delta=f"{r_under.get('player', '')} {r_under.get('milestone', '')}",
+                delta=f"{r_under.get('player', '')} vs {r_under.get('other_book', '')}",
                 delta_color="off",
             )
-            synth_col = "b365_synth_under (from slider)"
             m4.metric(
-                "Adm U vs synth U",
-                f"{r_under.get('adm_under', '—')} vs {r_under.get(synth_col, '—')}",
+                "Other U vs primary U",
+                f"{r_under.get('other_under', '—')} vs "
+                f"{r_under.get(f'{primary_label}_under_used', r_under.get(f'{primary_label}_under', '—'))}",
             )
 
-    # --- Table 1: exact 5+↔4.5, 10+↔9.5, ... ---
-    st.subheader("1) Exact matches (5+↔4.5, 10+↔9.5, 15+↔14.5, 20+↔19.5)")
+    other_arg = None if other_filter == "All books" else other_filter
+
+    st.subheader("1) Exact same line")
     st.markdown(
-        f"""
-**Over gap** = Bet365 Over − Admiral Over (negative = Bet365 shorter).  
-**Under gap** = Admiral Under − synth Bet365 Under (slider margin
-`{cmp_payload.get('b365_margin_assumed', margin):.0%}`).  
-🔴 MASSIVE when over gap ≤ {MASSIVE_UNDERCUT:.2f}.  
-Exact rows: **{summ.get('exact_half_line_matches', 0)}**.
-"""
+        f"**Over gap** = {book_label(primary_label)} Over − other Over "
+        f"(negative = primary shorter). Exact rows: "
+        f"**{summ.get('exact_half_line_matches', 0)}**."
     )
-    exact_df = _filter_game(comparison_table_df(cmp_payload, tier="exact"))
+    exact_df = _filter_view(comparison_table_df(cmp_payload, tier="exact", other_book=other_arg))
     if exact_df.empty:
-        st.info("No exact half-line overlaps with Admiral right now.")
+        st.info("No exact line overlaps for this filter.")
     else:
         _gap_metrics(exact_df, "Exact-match gap highlights")
-        st.caption("🔴 MASSIVE undercut · 🟠 undercut · 🟢 Bet365 longer")
-        st.dataframe(decorate_flags(exact_df), use_container_width=True, hide_index=True)
+        st.caption("🔴 MASSIVE undercut · 🟠 undercut · 🟢 primary longer")
+        st.dataframe(decorate_flags(exact_df), width="stretch", hide_index=True)
 
-    # --- Table 2: close lines (e.g. 15.5 vs 14.5) ---
-    st.subheader(f"2) Close lines (|Adm line − Bet365 half-line| ≤ {close_tol:g})")
-    st.caption(
-        "Same Over/Under gap math, but Admiral’s posted line is only *near* the "
-        "Bet365 milestone (e.g. Bet365 15+ / 14.5 vs Admiral 15.5)."
-    )
-    close_df = _filter_game(comparison_table_df(cmp_payload, tier="close"))
+    st.subheader(f"2) Close lines (|other − primary| ≤ {close_tol:g})")
+    st.caption("Same gap math when the other book’s line is only near the primary line.")
+    close_df = _filter_view(comparison_table_df(cmp_payload, tier="close", other_book=other_arg))
     if close_df.empty:
-        st.info(f"No close-line pairs within ±{close_tol:g} right now.")
+        st.info(f"No close-line pairs within ±{close_tol:g} for this filter.")
     else:
         st.caption(f"Close rows: **{summ.get('close_line_matches', 0)}** (all games) · 🟡 close line")
         _gap_metrics(close_df, "Close-line gap highlights")
-        st.dataframe(decorate_flags(close_df), use_container_width=True, hide_index=True)
+        st.dataframe(decorate_flags(close_df), width="stretch", hide_index=True)
 
     with st.expander(
         f"Far nearest only (no gaps) — {summ.get('far_nearest', 0)} rows",
         expanded=False,
     ):
-        far_df = _filter_game(comparison_table_df(cmp_payload, tier="far"))
+        far_df = _filter_view(comparison_table_df(cmp_payload, tier="far", other_book=other_arg))
         if far_df.empty:
             st.caption("None.")
         else:
-            st.caption("Admiral line too far from Bet365 half-line — gaps left empty on purpose.")
-            st.dataframe(far_df, use_container_width=True, hide_index=True)
+            st.caption("Nearest other line is farther than the close-line ± — gaps left empty.")
+            st.dataframe(far_df, width="stretch", hide_index=True)
 
     st.caption(f"Saved → `{COMPARE_PATH.as_posix()}`")
+
+
+def _sidebar_oddspapi_refresh(*, button_key: str, show_book_picker: bool = False) -> list[str]:
+    """
+    Shared OddsPapi status + refresh control.
+    Returns the selected book slugs (for fetch / display).
+    """
+    op_meta = load_oddspapi_meta()
+    st.caption(
+        f"OddsPapi games={op_meta.get('summary', {}).get('games', 0)} · "
+        f"players={op_meta.get('summary', {}).get('players', 0)} · "
+        f"fetched={op_meta.get('fetched_at') or '—'} · "
+        f"books={', '.join(op_meta.get('books') or []) or '—'}"
+    )
+    if op_meta.get("empty_props_note") and not (op_meta.get("summary") or {}).get("props_ready"):
+        st.info(op_meta["empty_props_note"])
+
+    catalog = selectable_book_slugs()
+    cached = [b for b in (op_meta.get("books") or []) if b in catalog]
+    default_pick = cached or list(DEFAULT_BOOKS)
+    if show_book_picker:
+        st.markdown("**Bookmakers to fetch**")
+        picked = st.multiselect(
+            "Books",
+            options=catalog,
+            default=[b for b in default_pick if b in catalog],
+            format_func=lambda s: f"{book_label(s)} — {book_note(s)}" if book_note(s) else book_label(s),
+            key=f"{button_key}_books",
+            help=(
+                "bet365 ≈ milestones only. "
+                "1xBet / Superbet / 22bet / Stake often have real Under. "
+                "API allows 3 books per request — more books = more quota."
+            ),
+        )
+        if len(picked) < 2:
+            st.warning("Pick at least 2 bookmakers.")
+        # Compact reminder of why some look "empty"
+        with st.expander("Why only bet365 / Superbet?", expanded=False):
+            st.markdown(
+                """
+- **bet365** & **Superbet** post dense **5+/10+/15+/20+** ladders.
+- **1xBet / 22bet / Stake** mostly post **other half-lines** (5.5, 8.5, 12.5…) with **Under**.
+- On API Fetch: clear the milestone filter or tick **Only rows with Under** to see them.
+"""
+            )
+    else:
+        picked = default_pick if len(default_pick) >= 2 else list(DEFAULT_BOOKS)
+
+    op_ok, op_reason = oddspapi_ready()
+    if not op_ok:
+        st.info(op_reason)
+    elif is_streamlit_cloud():
+        st.info(
+            "OddsPapi refresh is local-only (quota). "
+            "Push `data/oddspapi_*.json` after a local refresh."
+        )
+    else:
+        refresh_op = st.button(
+            "Refresh OddsPapi props",
+            key=button_key,
+            disabled=len(picked) < 2,
+            help="Fetches selected books for near-term EuroLeague fixtures (chunked ≤3 books/call).",
+        )
+        if refresh_op:
+            with st.spinner(f"Fetching props for {', '.join(picked)}…"):
+                try:
+                    result = refresh_euroleague_props(book_slugs=picked)
+                    if result.get("error") or not result.get("ok"):
+                        st.warning(result.get("error") or "OddsPapi refresh failed")
+                        ui_log(f"OddsPapi refresh: {result}", "error")
+                    else:
+                        ui_log(f"OddsPapi refresh: {result.get('summary')}")
+                        n_pl = int((result.get("summary") or {}).get("players") or 0)
+                        n_u = int((result.get("summary") or {}).get("rows_with_under") or 0)
+                        if n_pl == 0 and result.get("empty_props_note"):
+                            st.info(result["empty_props_note"])
+                        else:
+                            st.success(
+                                f"Saved {n_pl} players · {n_u} with Under · "
+                                f"books={', '.join(result.get('books') or [])}"
+                            )
+                        st.rerun()
+                except Exception as exc:  # noqa: BLE001
+                    ui_log(
+                        f"OddsPapi refresh failed: {exc}\n{traceback.format_exc()}",
+                        "error",
+                    )
+                    st.error(f"OddsPapi refresh failed: {exc}")
+    return picked
+
+
+def render_api_fetch_page(*, selected_fetch_books: list[str] | None = None) -> None:
+    """Raw OddsPapi Over/Under ladders side-by-side by bookmaker."""
+    st.title("API Fetch")
+    st.caption(
+        "EuroLeague player Points from OddsPapi (RapidAPI). "
+        "Pick bookmakers in the sidebar, then refresh. "
+        "bet365 ≈ N+ Over only · 1xBet / Superbet / 22bet / Stake often have **Under**."
+    )
+
+    board = load_oddspapi_board()
+    all_books = board_books(board) or list(DEFAULT_BOOKS)
+    games = board.get("games") or []
+    rows = odds_by_book_rows(board)
+    meta = load_oddspapi_meta()
+    summ = meta.get("summary") or {}
+    n_under = int(summ.get("rows_with_under") or sum(1 for r in rows if r.get("has_real_under")))
+    under_books = summ.get("books_with_under") or [
+        b for b in all_books if b in UNDER_CAPABLE_BOOKS
+    ]
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Games", int(summ.get("games") or len(games)))
+    m2.metric("Players", int(summ.get("players") or 0))
+    m3.metric("Prop rows", len(rows))
+    m4.metric("With Under", n_under)
+    m5.metric("Books on board", len(all_books))
+    st.caption(
+        f"Fetched `{meta.get('fetched_at') or 'never'}` · "
+        f"board={', '.join(all_books) or '—'} · "
+        f"under books={', '.join(under_books) or '—'} · "
+        f"`{(meta.get('path') or 'data/oddspapi_points_board.json')}`"
+    )
+    if meta.get("note"):
+        st.caption(meta["note"])
+
+    # Always-visible coverage so thin books aren't "invisible"
+    if rows and all_books:
+        cov_all = []
+        for book in all_books:
+            n_o = sum(1 for r in rows if r.get(f"{book}_over") is not None)
+            n_u = sum(1 for r in rows if r.get(f"{book}_under") is not None)
+            cov_all.append(
+                {
+                    "book": book_label(book),
+                    "slug": book,
+                    "overs": n_o,
+                    "unders": n_u,
+                    "note": book_note(book),
+                }
+            )
+        st.dataframe(pd.DataFrame(cov_all), width="stretch", hide_index=True, height=220)
+
+    if not rows:
+        if meta.get("empty_props_note") and (summ.get("fixtures_fetched") or games):
+            st.info(meta["empty_props_note"])
+        else:
+            st.warning(
+                "No OddsPapi props cached yet. "
+                "Pick books in the sidebar and hit **Refresh OddsPapi props**."
+            )
+        return
+
+    show_default = [b for b in (selected_fetch_books or all_books) if b in all_books] or all_books
+    show_books = st.multiselect(
+        "Show bookmakers (columns / tabs)",
+        options=all_books,
+        default=show_default,
+        format_func=lambda s: f"{book_label(s)} ({s})",
+        key="api_fetch_show_books",
+        help="Does not re-fetch — only changes which columns you see.",
+    )
+    if not show_books:
+        st.warning("Select at least one bookmaker to display.")
+        return
+
+    event_opts = ["All games"] + [g.get("event") or f"Game {i+1}" for i, g in enumerate(games)]
+    milestones = sorted(
+        {str(r.get("milestone")) for r in rows if r.get("milestone")},
+        key=lambda x: int(x.rstrip("+")) if str(x).rstrip("+").isdigit() else 999,
+    )
+    f1, f2, f3, f4 = st.columns([1.6, 1.1, 1.1, 1.2])
+    with f1:
+        pick = st.selectbox("Filter by game", options=event_opts, key="api_fetch_game")
+    with f2:
+        ms_pick = st.multiselect(
+            "Milestones (empty = all lines)",
+            options=milestones,
+            default=[],
+            key="api_fetch_milestones_v2",
+            help=(
+                "Leave empty to see all lines (needed for 1xBet/22bet/Stake). "
+                "5+/10+/15+/20+ alone mostly shows bet365 + Superbet."
+            ),
+        )
+    with f3:
+        only_under = st.checkbox(
+            "Only rows with Under",
+            value=False,
+            key="api_fetch_only_under",
+            help="Show lines where at least one book posted a real Under (not synth).",
+        )
+    with f4:
+        view = st.radio(
+            "View",
+            options=["Compare books", "Per book"],
+            horizontal=True,
+            key="api_fetch_view",
+        )
+
+    filtered = rows
+    if pick != "All games":
+        filtered = [r for r in filtered if r.get("event") == pick]
+    if only_under:
+        filtered = [r for r in filtered if r.get("has_real_under")]
+    elif ms_pick:
+        ms_set = set(ms_pick)
+        filtered = [r for r in filtered if r.get("milestone") in ms_set]
+
+    # Drop rows with no price in any selected display book
+    filtered = [
+        r
+        for r in filtered
+        if any(
+            r.get(f"{b}_over") is not None or r.get(f"{b}_under") is not None for b in show_books
+        )
+    ]
+
+    if not filtered:
+        st.info(
+            "No rows for this filter. Tip: clear milestones or enable "
+            "**Only rows with Under** to surface 1xBet / 22bet / Stake."
+        )
+        return
+
+    if view == "Compare books":
+        st.subheader("Over / Under by book")
+        st.caption(
+            "Shorter Over = shorter price. "
+            "`best_over_book` / `best_under_book` = shortest decimal on that side. "
+            "Empty Under = book only has N+ milestones (typical for bet365)."
+        )
+        df = pd.DataFrame(filtered)
+        show_cols = ["event", "player", "line", "milestone"]
+        for book in show_books:
+            show_cols.extend([f"{book}_over", f"{book}_under"])
+        show_cols.extend(
+            ["best_over_book", "best_over", "best_under_book", "best_under", "has_real_under"]
+        )
+        show_cols = [c for c in show_cols if c in df.columns]
+        st.dataframe(df[show_cols], width="stretch", hide_index=True, height=520)
+    else:
+        st.subheader("Per bookmaker")
+        tabs = st.tabs([book_label(b) for b in show_books])
+        for tab, book in zip(tabs, show_books):
+            with tab:
+                book_rows = []
+                for r in filtered:
+                    over = r.get(f"{book}_over")
+                    under = r.get(f"{book}_under")
+                    if over is None and under is None:
+                        continue
+                    book_rows.append(
+                        {
+                            "event": r.get("event"),
+                            "player": r.get("player"),
+                            "line": r.get("line"),
+                            "milestone": r.get("milestone"),
+                            "over": over,
+                            "under": under,
+                            "★O": "★" if r.get("best_over_book") == book else "",
+                            "★U": "★" if r.get("best_under_book") == book else "",
+                        }
+                    )
+                if not book_rows:
+                    st.info(
+                        f"No {book_label(book)} prices for this filter. "
+                        "Try clearing milestones or Only rows with Under."
+                    )
+                else:
+                    n_u = sum(1 for x in book_rows if x.get("under") is not None)
+                    st.caption(
+                        f"{len(book_rows)} lines · {n_u} with Under · "
+                        "★ = shortest vs other books on that side"
+                    )
+                    st.dataframe(
+                        pd.DataFrame(book_rows),
+                        width="stretch",
+                        hide_index=True,
+                        height=480,
+                    )
+
+    with st.expander("Line coverage (this filter)", expanded=False):
+        view_lines = sorted({float(r["line"]) for r in filtered if r.get("line") is not None})
+        st.caption(f"Distinct lines in view: {', '.join(f'{x:g}' for x in view_lines) or '—'}")
+        cov = []
+        for book in show_books:
+            n_o = sum(1 for r in filtered if r.get(f"{book}_over") is not None)
+            n_u = sum(1 for r in filtered if r.get(f"{book}_under") is not None)
+            cov.append({"book": book_label(book), "slug": book, "overs": n_o, "unders": n_u})
+        st.dataframe(pd.DataFrame(cov), width="stretch", hide_index=True)
 
 
 def main() -> None:
     with st.sidebar:
         page = st.radio(
             "Page",
-            options=["Form", "Market cut"],
+            options=["Form", "Market cut", "API Fetch"],
             index=0,
             key="app_page",
         )
@@ -1048,17 +1377,10 @@ def main() -> None:
                 f"Admiral rows={odds_meta.get('summary', {}).get('row_count', 0)} · "
                 f"fetched={odds_meta.get('fetched_at') or '—'}"
             )
-            op_meta = load_oddspapi_meta()
-            st.caption(
-                f"OddsPapi games={op_meta.get('summary', {}).get('games', 0)} · "
-                f"players={op_meta.get('summary', {}).get('players', 0)} · "
-                f"fetched={op_meta.get('fetched_at') or '—'} · "
-                f"books={', '.join(op_meta.get('books') or []) or '—'}"
+            _sidebar_oddspapi_refresh(
+                button_key="market_cut_refresh_oddspapi",
+                show_book_picker=True,
             )
-            if op_meta.get("empty_props_note") and not (op_meta.get("summary") or {}).get(
-                "props_ready"
-            ):
-                st.info(op_meta["empty_props_note"])
             board = load_props_board()
             n_games = len(board.get("games") or [])
             n_players = len(board_player_summary(board))
@@ -1066,44 +1388,21 @@ def main() -> None:
                 f"Active board ({board.get('source') or '—'}): "
                 f"{n_games} games · {n_players} players"
             )
-            op_ok, op_reason = oddspapi_ready()
-            if not op_ok:
-                st.info(op_reason)
-            elif is_streamlit_cloud():
-                st.info(
-                    "OddsPapi refresh is local-only (quota). "
-                    "Push `data/oddspapi_*.json` after a local refresh."
-                )
-            else:
-                refresh_op = st.button(
-                    "Refresh OddsPapi props",
-                    help="Near-term fixtures: bet365 + 1xBet + superbet.rs (uses several free-tier requests).",
-                )
-                if refresh_op:
-                    with st.spinner("Fetching EuroLeague props from OddsPapi…"):
-                        try:
-                            result = refresh_euroleague_props()
-                            if result.get("error") or not result.get("ok"):
-                                st.warning(result.get("error") or "OddsPapi refresh failed")
-                                ui_log(f"OddsPapi refresh: {result}", "error")
-                            else:
-                                ui_log(f"OddsPapi refresh: {result.get('summary')}")
-                                n_pl = int((result.get("summary") or {}).get("players") or 0)
-                                if n_pl == 0 and result.get("empty_props_note"):
-                                    st.info(result["empty_props_note"])
-                                else:
-                                    st.success(
-                                        f"Saved {n_pl} players · "
-                                        f"books={', '.join(result.get('books') or [])}"
-                                    )
-                                st.rerun()
-                        except Exception as exc:  # noqa: BLE001
-                            ui_log(
-                                f"OddsPapi refresh failed: {exc}\n{traceback.format_exc()}",
-                                "error",
-                            )
-                            st.error(f"OddsPapi refresh failed: {exc}")
         render_market_cut_page()
+        render_logs_panel()
+        return
+
+    if page == "API Fetch":
+        with st.sidebar:
+            st.caption(
+                "Choose which bookmakers to pull, then refresh. "
+                "Thin O/U books need empty milestone filter or Only Under."
+            )
+            picked_books = _sidebar_oddspapi_refresh(
+                button_key="api_fetch_refresh_oddspapi",
+                show_book_picker=True,
+            )
+        render_api_fetch_page(selected_fetch_books=picked_books)
         render_logs_panel()
         return
 
