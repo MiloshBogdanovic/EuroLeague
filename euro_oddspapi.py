@@ -302,19 +302,40 @@ def _outcome_side(oname: str | None, *, bookmaker_outcome_id: object = None) -> 
     return None
 
 
+def _is_three_point_market_text(mt: str) -> bool:
+    """
+    True for 3PM props. Must run before any 'point' substring check —
+    marketType 'players-3pointers' / 'playertotals-3pointers' contain 'point'.
+    """
+    t = _norm(mt).replace(" ", "")
+    return (
+        "3pointer" in t
+        or "3pointers" in t
+        or "3pt" in t
+        or "three" in t
+        or "trojk" in t  # Serbian labels if they ever appear in meta
+    )
+
+
 def _is_points_market(meta: dict[str, Any] | None, market_id: str) -> bool:
     if market_id in DEFAULT_PROP_MARKET_HINTS:
         return DEFAULT_PROP_MARKET_HINTS[market_id] == "Points"
     if not meta:
         return False
-    mt = _norm(str(meta.get("marketType") or meta.get("marketName") or ""))
-    if "rebound" in mt or "assist" in mt or "three" in mt or "3pt" in mt:
+    mt_raw = str(meta.get("marketType") or meta.get("marketName") or "")
+    if _is_three_point_market_text(mt_raw):
         return False
-    if "point" in mt or "score" in mt or mt.endswith("pts"):
+    mt = _norm(mt_raw)
+    if "rebound" in mt or "assist" in mt:
+        return False
+    # Strict Points families only (not pts+reb / pts+ast combos).
+    mt_compact = mt.replace(" ", "")
+    if mt_compact in ("players-points", "playerspoints") or mt_compact.startswith(
+        "playertotals-points"
+    ) or mt_compact.startswith("playertotalspoints"):
         return True
-    # playerProp + totals-like name
-    if meta.get("playerProp") and ("player" in mt or "prop" in mt):
-        return "point" in mt or "pts" in mt
+    if mt_compact.endswith("pts") and "ass" not in mt_compact and "reb" not in mt_compact:
+        return True
     return False
 
 
@@ -323,14 +344,19 @@ def _stat_for_market(meta: dict[str, Any] | None, market_id: str) -> str | None:
         return DEFAULT_PROP_MARKET_HINTS[market_id]
     if not meta:
         return None
-    mt = _norm(str(meta.get("marketType") or meta.get("marketName") or ""))
-    if "rebound" in mt:
-        return "TotalRebounds"
-    if "assist" in mt:
-        return "Assists"
-    if "three" in mt or "3pt" in mt or "3-pt" in mt:
+    mt_raw = str(meta.get("marketType") or meta.get("marketName") or "")
+    if _is_three_point_market_text(mt_raw):
         return "FGM3"
-    if "point" in mt or "score" in mt:
+    mt = _norm(mt_raw)
+    if "rebound" in mt and "point" not in mt.replace(" ", ""):
+        return "TotalRebounds"
+    if "assist" in mt and "point" not in mt.replace(" ", ""):
+        return "Assists"
+    # Combo markets (ptsreb / ptsass) — not pure Points
+    mt_compact = mt.replace(" ", "")
+    if any(x in mt_compact for x in ("ptsreb", "ptsass", "ptsassreb", "assreb")):
+        return None
+    if _is_points_market(meta, market_id):
         return "Points"
     return None
 
@@ -556,23 +582,28 @@ def _classify_rapid_prop_row(
 ) -> dict[str, Any] | None:
     """
     Parse one RapidAPI odds row into {stat, side, line, milestone, market_family}.
-    Returns None if not a Points player prop we care about.
+    Returns None if not a pure Points player prop (excludes 3PM / combos).
     """
     mid_s = str(row.get("marketId") or "")
     meta = markets_meta.get(mid_s)
-    mt = _norm(str((meta or {}).get("marketType") or ""))
-    stat = _stat_for_market(meta, mid_s)
-    if stat != "Points":
-        if "point" not in mt:
-            return None
-        stat = "Points"
+    mt_raw = str((meta or {}).get("marketType") or (meta or {}).get("marketName") or "")
+    # Hard reject 3-point milestones / totals before any 'point' substring match.
+    if _is_three_point_market_text(mt_raw):
+        return None
+    if not _is_points_market(meta, mid_s):
+        return None
+    mt = _norm(mt_raw)
+    mt_compact = mt.replace(" ", "")
+    # Only full-game / OT Points ladders + playertotals-points (skip Q1-only if tagged)
+    if "firstquarter" in mt_compact or "1stquarter" in mt_compact:
+        return None
     oname = _outcome_name_from_meta(meta, row.get("outcomeId"))
     side = _outcome_side(oname, bookmaker_outcome_id=row.get("bookmakerOutcomeId"))
     family = "unknown"
     line: float | None = None
     milestone: str | None = None
 
-    if "playertotals" in mt.replace(" ", ""):
+    if "playertotals" in mt_compact:
         family = "totals"
         try:
             line = float(meta.get("handicap")) if meta and meta.get("handicap") is not None else None
@@ -596,7 +627,7 @@ def _classify_rapid_prop_row(
     if line is None and milestone is None:
         return None
     return {
-        "stat": stat,
+        "stat": "Points",
         "side": side,
         "line": line,
         "milestone": milestone,
@@ -879,13 +910,13 @@ def extract_rows_from_fixture(
         for mid, mblock in markets.items():
             mid_s = str(mid)
             meta = markets_meta.get(mid_s)
-            stat = _stat_for_market(meta, mid_s) or (
-                DEFAULT_PROP_MARKET_HINTS.get(mid_s)
-            )
-            if stat != "Points":
+            mt_raw = str((meta or {}).get("marketType") or (meta or {}).get("marketName") or "")
+            if _is_three_point_market_text(mt_raw):
+                continue
+            if not _is_points_market(meta, mid_s):
                 continue
             handicap = (meta or {}).get("handicap")
-            mt = _norm(str((meta or {}).get("marketType") or ""))
+            mt = _norm(mt_raw)
             family = "totals" if "playertotals" in mt.replace(" ", "") else "milestone"
             for oid, pname, price, price_obj in _iter_player_prices(mblock):
                 side_label = _outcome_side_label(meta, oid, price_obj)
