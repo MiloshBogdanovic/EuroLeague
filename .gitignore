@@ -42,13 +42,14 @@ assets/
 screenshots/
 captures/
 
-# Regenerated on Market cut page — optional local cache
-# (keep bet365_points_board.json + admiralbet_lines.json tracked for Cloud)
+# Regenerated on Market cut page (Cloud rebuilds from snapshots — no need to commit)
 data/market_value_compare.json
-data/1x2online_lines.json
-data/1x2online_capture.json
 
-# OddsPapi live pulls (commit oddspapi_points_board.json when you want Cloud updated)
+# Local scrape scratch only (Cloud uses committed *lines.json / points_board.json)
+data/1x2online_capture.json
+data/admiralbet_capture.json
+
+# OddsPapi quota caches / per-book dumps (local only)
 data/oddspapi_bookmakers.json
 data/oddspapi_markets_basketball.json
 data/oddspapi_props.json
@@ -59,4 +60,9 @@ data/oddspapi_stake.json
 data/oddspapi_mozzart*.json
 data/oddspapi_maxbet*.json
 data/oddspapi_superbet*.json
-data/oddspapi_points_board.json
+
+# --- Cloud odds snapshots (TRACK these; refresh locally then commit/push) ---
+# data/oddspapi_points_board.json
+# data/admiralbet_lines.json
+# data/1x2online_lines.json
+# data/bet365_points_board.json  (legacy screenshot fallback)

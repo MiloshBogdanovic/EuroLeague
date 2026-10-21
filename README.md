@@ -39,11 +39,47 @@ python euro_oddspapi.py
 
 Boxscore / metadata caches live under [`data/`](data/) (especially `player_game_logs_*.csv`). They are committed so deploys and first loads hit the EuroLeague API much less often. Missing games are still fetched and merged into the cache at runtime.
 
+## Local odds → Streamlit Cloud (no API/scrape on the server)
+
+**Rule:** RapidAPI (OddsPapi) and Playwright scrapes (AdmiralBet, 1x2online) run **only on your PC**.  
+Cloud only **reads** committed JSON under `data/`.
+
+| File | Source | Needed on Cloud? |
+|------|--------|------------------|
+| `data/oddspapi_points_board.json` | OddsPapi refresh | Yes (Market cut / API Fetch) |
+| `data/admiralbet_lines.json` | AdmiralBet scrape | Yes (compare) |
+| `data/1x2online_lines.json` | 1x2online scrape | Yes (compare) |
+| `data/bet365_points_board.json` | Legacy screenshot | Optional fallback |
+| `data/oddspapi_*.json` caches | Local quota caches | No (gitignored) |
+| `data/*_capture.json` | Scrape debug dumps | No (gitignored) |
+
+### Publish workflow
+
+```powershell
+# 1) Refresh locally (sidebar buttons, or):
+python euro_oddspapi.py --refresh
+python euro_1x2online.py
+# AdmiralBet: use app sidebar "Refresh AdmiralBet lines"
+
+# 2) Stage Cloud snapshots
+python publish_odds_data.py
+# or refresh-all then stage:
+python publish_odds_data.py --refresh
+
+# 3) Commit + push when ready
+git status
+git commit -m "Update odds snapshots for Streamlit Cloud"
+git push
+```
+
+Streamlit Cloud redeploys from GitHub; Market cut rebuilds comparisons from those files (no keys on the server).
+
 ## Deploy on Streamlit Community Cloud (free)
 
 1. Push this repo to GitHub (public or private).
 2. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub.
 3. **New app** → pick this repo → main file `app.py` → Deploy.
 4. Wait for the build; open the public URL.
+5. After local odds refreshes, run `publish_odds_data.py` → commit → push so Cloud gets new lines.
 
-No API keys or secrets are required.
+No RapidAPI key or Playwright is required on Cloud. Keep `.env` local only.

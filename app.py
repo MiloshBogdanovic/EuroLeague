@@ -1382,6 +1382,17 @@ def main() -> None:
     if page == "Market cut":
         with st.sidebar:
             st.caption("Primary book vs others (OddsPapi + local scrapes).")
+            if is_streamlit_cloud():
+                st.info(
+                    "Cloud reads committed `data/*_lines.json` / "
+                    "`oddspapi_points_board.json` only — refresh locally, then "
+                    "`python publish_odds_data.py` → commit → push."
+                )
+            else:
+                st.caption(
+                    "After local refresh: `python publish_odds_data.py` → commit → push "
+                    "so Cloud can use the new snapshots (no API/scrape on the server)."
+                )
             odds_meta = load_admiralbet_lines()
             st.caption(
                 f"Admiral rows={odds_meta.get('summary', {}).get('row_count', 0)} · "
