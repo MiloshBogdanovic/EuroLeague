@@ -45,15 +45,18 @@ from euro_market_compare import (
     SCRAPE_BOOKS,
     DEFAULT_B365_MARGIN,
     DEFAULT_CLOSE_LINE_TOL,
+    DEFAULT_H2H_MIN_ODDS_SUM,
     MASSIVE_UNDERCUT,
     available_compare_books,
     board_player_summary,
     build_comparison,
+    build_odds_h2h,
     comparison_cache_is_fresh,
     comparison_table_df,
     decorate_flags,
     load_comparison,
     load_props_board,
+    odds_h2h_table_df,
     save_comparison,
 )
 from euro_oddspapi import (
@@ -818,8 +821,186 @@ def render_h2h_block(season: int, team_code: str, our_form: pd.DataFrame) -> Non
 
 
 def render_market_cut_page() -> None:
-    """Primary book vs other books (incl. Admiral) on same / close Points lines."""
+    """Market gaps + Odd H2H arb scanner."""
     st.title("Market cut")
+    tab_gaps, tab_h2h = st.tabs(["Market gaps", "Odd H2H"])
+    with tab_gaps:
+        _render_market_gaps_tab()
+    with tab_h2h:
+        _render_odds_h2h_tab()
+
+
+def _fmt_market_book(s: str) -> str:
+    if s in SCRAPE_BOOKS:
+        return f"{book_label(s)} (scrape)"
+    return f"{book_label(s)} ({s})"
+
+
+def _render_odds_h2h_tab() -> None:
+    """Two-book Over/Under arb finder with stake sizing."""
+    st.caption(
+        "Pick **two** books. For each player on a matching (exact/close) Points line, "
+        "take the best **Over on one book + Under on the other**. "
+        "When **1/O + 1/U < 1** you can stake both sides for a locked profit."
+    )
+    with st.expander("How Odd H2H works", expanded=False):
+        st.markdown(
+            f"""
+For a matched line we evaluate both crossings and keep the higher **O + U**:
+- Over @ book A + Under @ book B  
+- Over @ book B + Under @ book A  
+
+**Filter:** keep pairs with **O + U ≥ min sum** (default {DEFAULT_H2H_MIN_ODDS_SUM:g}).  
+**True arb:** `1/O + 1/U < 1` → stake so both sides pay the same:
+
+`stake_O = T × (1/O) / (1/O+1/U)` · `stake_U = T × (1/U) / (1/O+1/U)` · **profit = payout − T**
+
+Example: Over 2.00 + Under 2.10 → sum 4.10, implied ≈ 0.976 → about **2.4%** locked ROI.
+"""
+        )
+
+    board = load_props_board()
+    games = board.get("games") or []
+    book_opts = available_compare_books(board, include_admiral=True)
+    if len(book_opts) < 2:
+        st.warning("Need at least two books with Points quotes (refresh OddsPapi / scrapes).")
+        return
+
+    default_a = "bet365" if "bet365" in book_opts else book_opts[0]
+    default_b = (
+        BOOK_ADMIRAL
+        if BOOK_ADMIRAL in book_opts and BOOK_ADMIRAL != default_a
+        else next((b for b in book_opts if b != default_a), book_opts[0])
+    )
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        book_a = st.selectbox(
+            "Book A",
+            options=book_opts,
+            index=book_opts.index(default_a),
+            format_func=_fmt_market_book,
+            key="h2h_book_a",
+        )
+    with c2:
+        b_opts = [b for b in book_opts if b != book_a] or book_opts
+        b_idx = b_opts.index(default_b) if default_b in b_opts else 0
+        book_b = st.selectbox(
+            "Book B",
+            options=b_opts,
+            index=b_idx,
+            format_func=_fmt_market_book,
+            key="h2h_book_b",
+        )
+    with c3:
+        close_tol = st.slider(
+            "Close line ± points",
+            min_value=0.0,
+            max_value=3.0,
+            value=float(st.session_state.get("h2h_close_tol", DEFAULT_CLOSE_LINE_TOL)),
+            step=0.5,
+            key="h2h_close_tol",
+        )
+
+    c4, c5, c6 = st.columns(3)
+    with c4:
+        min_sum = st.number_input(
+            "Min Over+Under sum",
+            min_value=2.0,
+            max_value=10.0,
+            value=float(st.session_state.get("h2h_min_sum", DEFAULT_H2H_MIN_ODDS_SUM)),
+            step=0.1,
+            key="h2h_min_sum",
+            help="Keep pairs where over_odds + under_odds is at least this (e.g. 4.0).",
+        )
+    with c5:
+        total_stake = st.number_input(
+            "Total stake",
+            min_value=1.0,
+            max_value=1_000_000.0,
+            value=float(st.session_state.get("h2h_total_stake", 100.0)),
+            step=10.0,
+            key="h2h_total_stake",
+            help="Bankroll to split across Over and Under for equal payout.",
+        )
+    with c6:
+        arbs_only = st.checkbox(
+            "True arbs only (1/O+1/U < 1)",
+            value=True,
+            key="h2h_arbs_only",
+        )
+
+    if book_a == book_b:
+        st.warning("Pick two different books.")
+        return
+
+    try:
+        payload = build_odds_h2h(
+            board=board,
+            book_a=book_a,
+            book_b=book_b,
+            close_tol=close_tol,
+            min_odds_sum=float(min_sum),
+            total_stake=float(total_stake),
+            exact_or_close_only=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        ui_log(f"Odd H2H failed: {exc}\n{traceback.format_exc()}", "error")
+        st.error(f"Odd H2H failed: {exc}")
+        return
+
+    summ = payload.get("summary") or {}
+    st.caption(
+        f"**{book_label(book_a)}** ↔ **{book_label(book_b)}** · "
+        f"quotes {summ.get('quotes_a', 0)}/{summ.get('quotes_b', 0)} · "
+        f"pairs **{summ.get('pairs', 0)}** (exact {summ.get('exact', 0)} · "
+        f"close {summ.get('close', 0)}) · "
+        f"true arbs **{summ.get('arbs', 0)}** · "
+        f"board `{board.get('source') or '—'}` · {len(games)} games"
+    )
+
+    event_opts = ["All games"] + [g.get("event") or f"Game {i+1}" for i, g in enumerate(games)]
+    # Scrape-anchored rows may have empty event — still list board games for filter.
+    pick = st.selectbox("Filter by game", options=event_opts, key="h2h_game")
+
+    df = odds_h2h_table_df(payload, arbs_only=arbs_only)
+    if not df.empty and pick != "All games" and "event" in df.columns:
+        df = df[df["event"] == pick].reset_index(drop=True)
+
+    m1, m2, m3, m4 = st.columns(4)
+    if not df.empty and "profit" in df.columns and df["profit"].notna().any():
+        best = df.loc[df["profit"].idxmax()]
+        m1.metric("Best profit", f"{best['profit']:+.2f}", delta=str(best.get("player", "")))
+        m2.metric("Best ROI %", f"{best.get('roi_pct', 0):+.2f}%")
+        m3.metric(
+            "Stake Over / Under",
+            f"{best.get('stake_over', '—')} / {best.get('stake_under', '—')}",
+        )
+        m4.metric("O+U / implied", f"{best.get('odds_sum', '—')} / {best.get('implied_sum', '—')}")
+    else:
+        m1.metric("Pairs shown", len(df))
+        m2.metric("True arbs (all)", int(summ.get("arbs") or 0))
+
+    if df.empty:
+        st.info(
+            "No pairs with Over+Under ≥ min sum on exact/close lines. "
+            "Widen close-line ±, lower the min sum, or refresh books that post real Unders "
+            "(AdmiralBet / 1xBet / Superbet)."
+        )
+        return
+
+    st.caption(
+        "🟢 `is_arb` = guaranteed profit if both bets settle on the matched line. "
+        "Close-line pairs are riskier (different thresholds)."
+    )
+    show = df.copy()
+    if "is_arb" in show.columns:
+        show["is_arb"] = show["is_arb"].map(lambda v: "✅" if v else "")
+    st.dataframe(show, width="stretch", hide_index=True)
+
+
+def _render_market_gaps_tab() -> None:
+    """Primary book vs other books (incl. Admiral) on same / close Points lines."""
     st.caption(
         "Pick a **primary** bookmaker, then compare its Points Over/Under to every "
         "other selected book on the **same line** or within your **close-line ±** "
@@ -850,18 +1031,13 @@ def render_market_cut_page() -> None:
 
     default_primary = "bet365" if "bet365" in book_opts else book_opts[0]
 
-    def _fmt_book(s: str) -> str:
-        if s in SCRAPE_BOOKS:
-            return f"{book_label(s)} (scrape)"
-        return f"{book_label(s)} ({s})"
-
     c1, c2, c3 = st.columns([1.2, 1.8, 1.2])
     with c1:
         primary = st.selectbox(
             "Primary book",
             options=book_opts,
             index=book_opts.index(default_primary) if default_primary in book_opts else 0,
-            format_func=_fmt_book,
+            format_func=_fmt_market_book,
             key="market_cut_primary",
             help="Anchor book — only players offered by this book appear; others are compared to it.",
         )
@@ -873,7 +1049,7 @@ def render_market_cut_page() -> None:
             "Compare against",
             options=other_opts,
             default=default_others,
-            format_func=_fmt_book,
+            format_func=_fmt_market_book,
             key="market_cut_compare_books",
             help="OddsPapi books + local scrapes (AdmiralBet, 1x2online).",
         )

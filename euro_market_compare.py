@@ -1078,6 +1078,386 @@ def style_gap_table(df):
     return decorate_flags(df)
 
 
+# ---------------------------------------------------------------------------
+# Odd H2H — two-book Over/Under arb scanner
+# ---------------------------------------------------------------------------
+
+DEFAULT_H2H_MIN_ODDS_SUM = 4.0
+
+
+def stake_split(
+    total_stake: float,
+    over_odds: float,
+    under_odds: float,
+) -> dict[str, float | None]:
+    """
+    Split total bankroll so Over and Under pay the same.
+
+    stake_O = T * (1/O) / (1/O + 1/U)
+    stake_U = T * (1/U) / (1/O + 1/U)
+    payout  = T / (1/O + 1/U)
+    profit  = payout − T   (positive when 1/O + 1/U < 1)
+    """
+    try:
+        o = float(over_odds)
+        u = float(under_odds)
+        t = float(total_stake)
+    except (TypeError, ValueError):
+        return {
+            "stake_over": None,
+            "stake_under": None,
+            "payout": None,
+            "profit": None,
+            "roi_pct": None,
+            "implied_sum": None,
+        }
+    if o <= 1.0 or u <= 1.0 or t <= 0:
+        return {
+            "stake_over": None,
+            "stake_under": None,
+            "payout": None,
+            "profit": None,
+            "roi_pct": None,
+            "implied_sum": None,
+        }
+    io, iu = 1.0 / o, 1.0 / u
+    s = io + iu
+    payout = t / s
+    stake_o = t * io / s
+    stake_u = t * iu / s
+    profit = payout - t
+    return {
+        "stake_over": round(stake_o, 2),
+        "stake_under": round(stake_u, 2),
+        "payout": round(payout, 2),
+        "profit": round(profit, 2),
+        "roi_pct": round(100.0 * profit / t, 2),
+        "implied_sum": round(s, 4),
+    }
+
+
+def _book_quote_rows(
+    board: dict[str, Any],
+    book: str,
+) -> list[dict[str, Any]]:
+    """Flatten Points Over/Under quotes for one book (board or local scrape)."""
+    rows: list[dict[str, Any]] = []
+    if book in SCRAPE_BOOKS:
+        board_players = iter_board_players(board)
+        for q in _scrape_points_index(book):
+            name = q.get("player") or ""
+            hint = q.get("team")
+            event = ""
+            tip_off = None
+            best_score = 0
+            for p in board_players:
+                score = _name_match_score(
+                    name, p.get("player") or "", p.get("team_hint"), hint
+                )
+                if score > best_score:
+                    best_score = score
+                    event = p.get("event") or ""
+                    tip_off = p.get("tip_off")
+            rows.append(
+                {
+                    "book": book,
+                    "player": name,
+                    "team_hint": hint,
+                    "event": event if best_score > 0 else "",
+                    "tip_off": tip_off if best_score > 0 else None,
+                    "line": float(q["line"]),
+                    "milestone": q.get("milestone"),
+                    "over": q.get("over"),
+                    "under": q.get("under"),
+                    "has_real_under": bool(q.get("has_real_under")),
+                }
+            )
+        return rows
+
+    for p in iter_board_players(board):
+        for q in _quotes_for_book_on_player(p, book):
+            rows.append(
+                {
+                    "book": book,
+                    "player": p.get("player") or "",
+                    "team_hint": p.get("team_hint"),
+                    "event": p.get("event") or "",
+                    "tip_off": p.get("tip_off"),
+                    "line": float(q["line"]),
+                    "milestone": q.get("milestone"),
+                    "over": q.get("over"),
+                    "under": q.get("under"),
+                    "has_real_under": bool(q.get("has_real_under")),
+                }
+            )
+    return rows
+
+
+def _best_cross_book_quote(
+    player: str,
+    line: float,
+    team_hint: str | None,
+    other_rows: list[dict[str, Any]],
+    *,
+    close_tol: float,
+) -> tuple[dict[str, Any] | None, str]:
+    """Nearest same-player quote on the other book within close_tol (or far)."""
+    scored: list[tuple[int, float, dict[str, Any]]] = []
+    for r in other_rows:
+        score = _name_match_score(
+            player, r.get("player") or "", r.get("team_hint"), team_hint
+        )
+        if score <= 0:
+            continue
+        try:
+            diff = abs(float(r["line"]) - float(line))
+        except (TypeError, ValueError, KeyError):
+            continue
+        scored.append((score, diff, r))
+    if not scored:
+        return None, "none"
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    _score, best_diff, best = scored[0]
+    if best_diff < 1e-6:
+        return best, "exact"
+    if best_diff <= float(close_tol) + 1e-9:
+        return best, "close"
+    return best, "far"
+
+
+def build_odds_h2h(
+    *,
+    board: dict[str, Any] | None = None,
+    book_a: str,
+    book_b: str,
+    close_tol: float = DEFAULT_CLOSE_LINE_TOL,
+    min_odds_sum: float = DEFAULT_H2H_MIN_ODDS_SUM,
+    total_stake: float = 100.0,
+    exact_or_close_only: bool = True,
+) -> dict[str, Any]:
+    """
+    Scan two books for same/close Points lines and pick the best Over@one + Under@other
+    combo (highest O+U). Rows with O+U ≥ min_odds_sum are kept; stake_split sizes the bankroll.
+
+    True arb when implied_sum = 1/O + 1/U < 1 (guaranteed profit if both sides settle).
+    """
+    if not book_a or not book_b or book_a == book_b:
+        return {
+            "book_a": book_a,
+            "book_b": book_b,
+            "rows": [],
+            "summary": {"pairs": 0, "arbs": 0, "error": "pick_two_distinct_books"},
+        }
+
+    board = board or load_props_board()
+    rows_a = _book_quote_rows(board, book_a)
+    rows_b = _book_quote_rows(board, book_b)
+
+    # Deduplicate pairs: key = (norm_name, round(line_a,1), round(line_b,1), direction)
+    seen: set[tuple] = set()
+    out_rows: list[dict[str, Any]] = []
+
+    def _consider(qa: dict[str, Any], qb: dict[str, Any], tier: str) -> None:
+        if exact_or_close_only and tier not in ("exact", "close"):
+            return
+        combos: list[tuple[float, float, str, str, str, str]] = []
+        # Over on A, Under on B
+        if qa.get("over") is not None and qb.get("under") is not None:
+            combos.append(
+                (
+                    float(qa["over"]),
+                    float(qb["under"]),
+                    book_a,
+                    "over",
+                    book_b,
+                    "under",
+                )
+            )
+        # Over on B, Under on A
+        if qb.get("over") is not None and qa.get("under") is not None:
+            combos.append(
+                (
+                    float(qb["over"]),
+                    float(qa["under"]),
+                    book_b,
+                    "over",
+                    book_a,
+                    "under",
+                )
+            )
+        if not combos:
+            return
+        # Highest combined odds
+        combos.sort(key=lambda c: c[0] + c[1], reverse=True)
+        o_odds, u_odds, o_book, _o_side, u_book, _u_side = combos[0]
+        odds_sum = o_odds + u_odds
+        if odds_sum + 1e-9 < float(min_odds_sum):
+            return
+
+        name = qa.get("player") or qb.get("player") or ""
+        line_a = float(qa["line"])
+        line_b = float(qb["line"])
+        dedupe = (
+            _norm_name(name),
+            round(line_a, 1),
+            round(line_b, 1),
+            o_book,
+            u_book,
+        )
+        if dedupe in seen:
+            return
+        seen.add(dedupe)
+
+        stakes = stake_split(total_stake, o_odds, u_odds)
+        implied = stakes.get("implied_sum")
+        is_arb = implied is not None and float(implied) < 1.0 - 1e-9
+
+        out_rows.append(
+            {
+                "event": qa.get("event") or qb.get("event") or "",
+                "player": name,
+                "team_hint": qa.get("team_hint") or qb.get("team_hint"),
+                "match_tier": tier,
+                "line_a": line_a,
+                "line_b": line_b,
+                "line_diff": round(line_b - line_a, 1),
+                "milestone_a": qa.get("milestone"),
+                "milestone_b": qb.get("milestone"),
+                "over_book": o_book,
+                "over_odds": o_odds,
+                "under_book": u_book,
+                "under_odds": u_odds,
+                "odds_sum": round(odds_sum, 3),
+                "implied_sum": implied,
+                "is_arb": is_arb,
+                "total_stake": float(total_stake),
+                "stake_over": stakes.get("stake_over"),
+                "stake_under": stakes.get("stake_under"),
+                "payout": stakes.get("payout"),
+                "profit": stakes.get("profit"),
+                "roi_pct": stakes.get("roi_pct"),
+                "book_a": book_a,
+                "book_b": book_b,
+                "a_over": qa.get("over"),
+                "a_under": qa.get("under"),
+                "b_over": qb.get("over"),
+                "b_under": qb.get("under"),
+            }
+        )
+
+    # Anchor on A, match into B
+    for qa in rows_a:
+        qb, tier = _best_cross_book_quote(
+            qa.get("player") or "",
+            float(qa["line"]),
+            qa.get("team_hint"),
+            rows_b,
+            close_tol=close_tol,
+        )
+        if qb is None or tier == "none":
+            continue
+        _consider(qa, qb, tier)
+
+    # Also anchor on B quotes that may not have been nearest from A's side
+    # (e.g. B has extra lines). Skip if already covered via dedupe.
+    for qb in rows_b:
+        qa, tier = _best_cross_book_quote(
+            qb.get("player") or "",
+            float(qb["line"]),
+            qb.get("team_hint"),
+            rows_a,
+            close_tol=close_tol,
+        )
+        if qa is None or tier == "none":
+            continue
+        _consider(qa, qb, tier)
+
+    out_rows.sort(
+        key=lambda r: (
+            0 if r.get("is_arb") else 1,
+            -(r.get("profit") or -1e9),
+            -(r.get("odds_sum") or 0),
+        )
+    )
+
+    arbs = [r for r in out_rows if r.get("is_arb")]
+    return {
+        "book_a": book_a,
+        "book_b": book_b,
+        "close_tol": close_tol,
+        "min_odds_sum": min_odds_sum,
+        "total_stake": total_stake,
+        "rows": out_rows,
+        "arb_rows": arbs,
+        "summary": {
+            "quotes_a": len(rows_a),
+            "quotes_b": len(rows_b),
+            "pairs": len(out_rows),
+            "arbs": len(arbs),
+            "exact": sum(1 for r in out_rows if r.get("match_tier") == "exact"),
+            "close": sum(1 for r in out_rows if r.get("match_tier") == "close"),
+        },
+    }
+
+
+def odds_h2h_table_df(
+    payload: dict[str, Any] | None,
+    *,
+    arbs_only: bool = False,
+):
+    """DataFrame for Odd H2H Streamlit table."""
+    import pandas as pd
+
+    if not payload:
+        return pd.DataFrame()
+    rows = payload.get("arb_rows") if arbs_only else payload.get("rows")
+    rows = rows or []
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    cols = [
+        "is_arb",
+        "match_tier",
+        "event",
+        "player",
+        "team_hint",
+        "line_a",
+        "line_b",
+        "line_diff",
+        "over_book",
+        "over_odds",
+        "under_book",
+        "under_odds",
+        "odds_sum",
+        "implied_sum",
+        "stake_over",
+        "stake_under",
+        "payout",
+        "profit",
+        "roi_pct",
+        "total_stake",
+    ]
+    cols = [c for c in cols if c in df.columns]
+    out = df[cols].copy()
+    for c in (
+        "line_a",
+        "line_b",
+        "line_diff",
+        "over_odds",
+        "under_odds",
+        "odds_sum",
+        "implied_sum",
+        "stake_over",
+        "stake_under",
+        "payout",
+        "profit",
+        "roi_pct",
+    ):
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce").round(3)
+    return out.reset_index(drop=True)
+
+
 if __name__ == "__main__":
     payload = save_comparison()
     print(f"Wrote {COMPARE_PATH}")
