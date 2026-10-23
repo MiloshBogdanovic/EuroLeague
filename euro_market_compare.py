@@ -149,9 +149,10 @@ def iter_board_players(board: dict[str, Any] | None = None) -> list[dict[str, An
             row["tip_off"] = tip
             if not row.get("odds") and row.get("odds_by_book"):
                 by_book = row["odds_by_book"]
-                row["odds"] = dict(
-                    by_book.get(BOOK_BET365) or next(iter(by_book.values()), {}) or {}
-                )
+                # Never borrow another book's ladder into legacy `odds` — that made
+                # non-bet365 players look like bet365 offers in Market cut.
+                if by_book.get(BOOK_BET365):
+                    row["odds"] = dict(by_book[BOOK_BET365] or {})
             out.append(row)
     if not out and board.get("players"):
         for p in board["players"]:
@@ -193,14 +194,66 @@ def _line_key(line: float) -> str:
     return f"{f:g}"
 
 
-def board_player_summary(board: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """One row per input player (for the Market cut player list)."""
+def board_player_summary(
+    board: dict[str, Any] | None = None,
+    *,
+    primary_book: str | None = None,
+) -> list[dict[str, Any]]:
+    """One row per input player (for the Market cut player list).
+
+    When primary_book is set, only players with a real offer on that book are listed.
+    Local scrape primaries (admiralbet / 1x2online) are summarized from the scrape index.
+    """
     board = board or load_props_board()
+    if primary_book and primary_book in SCRAPE_BOOKS:
+        by_name: dict[str, dict[str, Any]] = {}
+        for q in _scrape_points_index(primary_book):
+            name = q.get("player") or ""
+            if not name:
+                continue
+            row = by_name.setdefault(
+                _norm_name(name),
+                {
+                    "event": "",
+                    "tip_off": None,
+                    "player": name,
+                    "team_hint": q.get("team"),
+                    "books": primary_book,
+                    "milestones": [],
+                    "n_milestones": 0,
+                },
+            )
+            ms = q.get("milestone")
+            over = q.get("over")
+            if ms is not None and over is not None:
+                row["milestones"].append(f"{ms}@{over}")
+        out = []
+        for row in by_name.values():
+            ms_list = sorted(
+                row["milestones"],
+                key=lambda s: int(str(s).split("@", 1)[0].rstrip("+") or 0),
+            )
+            out.append(
+                {
+                    **row,
+                    "milestones": ", ".join(ms_list),
+                    "n_milestones": len(ms_list),
+                }
+            )
+        return sorted(out, key=lambda r: (r.get("team_hint") or "", r.get("player") or ""))
+
     rows = []
     for p in iter_board_players(board):
-        odds = p.get("odds") or {}
+        if primary_book and not _quotes_for_book_on_player(p, primary_book):
+            continue
         by_book = p.get("odds_by_book") or {}
         book_bits = [b for b, b_odds in sorted(by_book.items()) if b_odds]
+        if primary_book:
+            odds = by_book.get(primary_book) or (
+                p.get("odds") if primary_book == BOOK_BET365 else {}
+            ) or {}
+        else:
+            odds = p.get("odds") or {}
         rows.append(
             {
                 "event": p.get("event"),
@@ -210,7 +263,7 @@ def board_player_summary(board: dict[str, Any] | None = None) -> list[dict[str, 
                 "books": ", ".join(book_bits) if book_bits else (board.get("source") or "—"),
                 "milestones": ", ".join(
                     f"{k}@{v}"
-                    for k, v in sorted(odds.items(), key=lambda kv: int(kv[0].rstrip("+")))
+                    for k, v in sorted(odds.items(), key=lambda kv: int(str(kv[0]).rstrip("+")))
                 ),
                 "n_milestones": len(odds),
             }
@@ -317,10 +370,13 @@ def _quotes_for_book_on_player(player: dict[str, Any], book: str) -> list[dict[s
             "has_real_under": bool(cell.get("has_real_under") or cell.get("under") is not None),
         }
 
-    odds = (player.get("odds_by_book") or {}).get(book) or {}
+    by_book = player.get("odds_by_book") or {}
+    odds = by_book.get(book) or {}
     unders = (player.get("under_by_book") or {}).get(book) or {}
-    # Legacy single map
-    if not odds and book == BOOK_BET365 and player.get("odds"):
+    # Legacy screenshot boards only store a single `odds` map (always bet365).
+    # Multi-book OddsPapi boards must not fall back — that mislabeled other
+    # books' ladders as the primary book and leaked non-primary players.
+    if not odds and not by_book and book == BOOK_BET365 and player.get("odds"):
         odds = player.get("odds") or {}
     for ms, over in odds.items():
         line = _milestone_to_line(str(ms))
@@ -361,7 +417,14 @@ def _quotes_for_book_on_player(player: dict[str, Any], book: str) -> list[dict[s
             cell["has_real_under"] = True
         by_line[key] = cell
 
-    return sorted(by_line.values(), key=lambda q: float(q["line"]))
+    return sorted(
+        [
+            q
+            for q in by_line.values()
+            if q.get("over") is not None or q.get("under") is not None
+        ],
+        key=lambda q: float(q["line"]),
+    )
 
 
 def _scrape_points_index(book: str) -> list[dict[str, Any]]:
@@ -720,7 +783,7 @@ def build_comparison(
         reverse=True,
     )
 
-    players_in = board_player_summary(board)
+    players_in = board_player_summary(board, primary_book=primary)
     board_path = active_board_path(board)
     board_mtime = None
     try:

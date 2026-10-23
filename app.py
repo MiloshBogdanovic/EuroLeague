@@ -835,7 +835,6 @@ def render_market_cut_page() -> None:
 
     board = load_props_board()
     games = board.get("games") or []
-    players = board_player_summary(board)
     src_label = board.get("source") or "screenshot"
     book_opts = available_compare_books(board, include_admiral=True)
     if not book_opts:
@@ -856,8 +855,9 @@ def render_market_cut_page() -> None:
             index=book_opts.index(default_primary) if default_primary in book_opts else 0,
             format_func=_fmt_book,
             key="market_cut_primary",
-            help="Anchor book — every other selected book is compared to this one.",
+            help="Anchor book — only players offered by this book appear; others are compared to it.",
         )
+    players = board_player_summary(board, primary_book=primary)
     with c2:
         other_opts = [b for b in book_opts if b != primary]
         default_others = [b for b in other_opts if b != primary]
@@ -955,15 +955,22 @@ def render_market_cut_page() -> None:
             key="market_cut_other_filter",
         )
 
-    with st.expander("Input players (props board)", expanded=False):
+    with st.expander(
+        f"Primary-book players ({book_label(primary)}) — {len(players)}",
+        expanded=False,
+    ):
         if not players:
             op_meta = load_oddspapi_meta()
             if op_meta.get("fetched_at") and (op_meta.get("summary") or {}).get("fixtures_fetched"):
                 st.info(op_meta.get("empty_props_note") or "Fixtures loaded, props not out yet.")
             else:
-                st.warning("No players on the OddsPapi board — refresh from the sidebar.")
+                st.warning(
+                    f"No players on **{book_label(primary)}** — pick another primary book "
+                    "or refresh OddsPapi / scrapes from the sidebar."
+                )
         else:
             show = players if pick == "All games" else [p for p in players if p.get("event") == pick]
+            st.caption("Table only compares these players to the other selected books.")
             st.dataframe(pd.DataFrame(show), width="stretch", hide_index=True)
 
     if not cmp_payload:
