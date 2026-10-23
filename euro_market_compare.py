@@ -112,16 +112,57 @@ def load_bet365_board(path: Path | None = None) -> dict[str, Any]:
     return _normalize_board_shape(data, path)
 
 
+def _board_player_count(board: dict[str, Any] | None) -> int:
+    if not board:
+        return 0
+    n = sum(len(g.get("players") or []) for g in (board.get("games") or []))
+    if n:
+        return n
+    return len(board.get("players") or [])
+
+
+def _board_fetched_at(board: dict[str, Any] | None) -> str:
+    return str((board or {}).get("fetched_at") or "")
+
+
 def load_props_board(*, prefer_oddspapi: bool = True) -> dict[str, Any]:
-    """OddsPapi board when it has players, else legacy screenshot board."""
-    if prefer_oddspapi:
-        op = load_oddspapi_board()
-        n = sum(len(g.get("players") or []) for g in (op.get("games") or []))
-        if n > 0:
-            return _normalize_board_shape(
-                op, Path(op["path"]) if op.get("path") else ODDSPAPI_BOARD_PATH
-            )
-    return load_bet365_board()
+    """OddsPapi board when it has players, else legacy screenshot board.
+
+    Prefer bet365 screenshots when:
+      - EURO_PREFER_BET365_BOARD=1, or
+      - screenshot board has players and a newer fetched_at than OddsPapi
+        (local quota workaround that can also ship to Cloud via commit).
+    """
+    import os
+
+    b365 = load_bet365_board()
+    b365_n = _board_player_count(b365)
+    force_b365 = os.environ.get("EURO_PREFER_BET365_BOARD", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if force_b365 and b365_n > 0:
+        return b365
+
+    op = load_oddspapi_board()
+    op_n = _board_player_count(op)
+    if (
+        b365_n > 0
+        and _board_fetched_at(b365)
+        and (not _board_fetched_at(op) or _board_fetched_at(b365) > _board_fetched_at(op))
+    ):
+        return b365
+
+    if prefer_oddspapi and op_n > 0:
+        return _normalize_board_shape(
+            op, Path(op["path"]) if op.get("path") else ODDSPAPI_BOARD_PATH
+        )
+    if b365_n > 0:
+        return b365
+    return _normalize_board_shape(
+        op, Path(op["path"]) if op.get("path") else ODDSPAPI_BOARD_PATH
+    ) if op_n else b365
 
 
 def active_board_path(board: dict[str, Any] | None = None) -> Path | None:

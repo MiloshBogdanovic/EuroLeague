@@ -26,7 +26,17 @@ ODDSPAPI_RAPIDAPI_HOST=odds-api1.p.rapidapi.com
 ```
 
 2. In the app sidebar: **Refresh OddsPapi props** (and **Refresh AdmiralBet lines** locally).
-3. Open **Market cut** — active board prefers `data/oddspapi_points_board.json`; legacy `data/bet365_points_board.json` is screenshot fallback only.
+3. Open **Market cut** — active board prefers `data/oddspapi_points_board.json` unless the bet365 screenshot board is newer (or `EURO_PREFER_BET365_BOARD=1`).
+
+### OddsPapi quota workaround (bet365 screenshots)
+
+When RapidAPI is exhausted, transcribe Player Points ladders into `import_bet365_screenshot_board.py` and run:
+
+```powershell
+python import_bet365_screenshot_board.py --prefer
+```
+
+That writes `data/bet365_points_board.json` and sets `EURO_PREFER_BET365_BOARD=1` in local `.env`. Commit + push the JSON so Cloud picks it up (fresher `fetched_at` wins over OddsPapi). Keep the import script on branch `local/bet365-screenshots` if you do not want it on `main`.
 
 CLI smoke test:
 

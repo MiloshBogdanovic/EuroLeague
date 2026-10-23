@@ -11,11 +11,19 @@ from __future__ import annotations
 import logging
 import traceback
 from datetime import datetime
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+except ImportError:
+    pass
 
 from euro_admiralbet import (
     STAT_LABELS,
