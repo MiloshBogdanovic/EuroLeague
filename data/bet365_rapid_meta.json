@@ -1,0 +1,13 @@
+{
+  "fetched_at": "2026-10-26T14:37:21Z",
+  "source": "bet365 rapidapi",
+  "host": "bet36528.p.rapidapi.com",
+  "fixtures_considered": 10,
+  "summary": {
+    "games": 6,
+    "players": 72,
+    "quotes": 412
+  },
+  "errors": [],
+  "board_path": "C:\\Users\\bogda\\Desktop\\GitHub\\EuroLeague\\data\\bet365_points_board.json"
+}

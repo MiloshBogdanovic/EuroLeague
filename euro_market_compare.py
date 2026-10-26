@@ -125,32 +125,84 @@ def _board_fetched_at(board: dict[str, Any] | None) -> str:
     return str((board or {}).get("fetched_at") or "")
 
 
-def load_props_board(*, prefer_oddspapi: bool = True) -> dict[str, Any]:
-    """OddsPapi board when it has players, else legacy screenshot board.
+def _parse_tip_off(tip: object):
+    from datetime import datetime, timezone
 
-    Prefer bet365 screenshots when:
-      - EURO_PREFER_BET365_BOARD=1, or
-      - screenshot board has players and a newer fetched_at than OddsPapi
-        (local quota workaround that can also ship to Cloud via commit).
+    if tip is None:
+        return None
+    s = str(tip).strip()
+    if not s:
+        return None
+    try:
+        if s.endswith("Z"):
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        return None
+
+
+def board_has_upcoming_games(
+    board: dict[str, Any] | None,
+    *,
+    grace_hours: float = 6.0,
+) -> bool:
+    """True if any tip_off is still in the future (or tipped off within grace_hours)."""
+    from datetime import datetime, timedelta, timezone
+
+    if not board:
+        return False
+    now = datetime.now(timezone.utc)
+    earliest = now - timedelta(hours=float(grace_hours))
+    for g in board.get("games") or []:
+        tip = _parse_tip_off(g.get("tip_off"))
+        if tip is not None and tip >= earliest:
+            return True
+    return False
+
+
+def load_props_board(*, prefer_oddspapi: bool = True) -> dict[str, Any]:
+    """Pick the active Market cut board.
+
+    Prefer bet365 RapidAPI / screenshot board when it is fresher *and still has
+    upcoming tip-offs*. Never stick on finished Friday games when OddsPapi (or a
+    newer bet365 refresh) already has the next round — even if
+    EURO_PREFER_BET365_BOARD=1.
     """
     import os
 
     b365 = load_bet365_board()
     b365_n = _board_player_count(b365)
+    op = load_oddspapi_board()
+    op_n = _board_player_count(op)
+    b365_upcoming = board_has_upcoming_games(b365)
+    op_upcoming = board_has_upcoming_games(op)
+
     force_b365 = os.environ.get("EURO_PREFER_BET365_BOARD", "").strip().lower() in (
         "1",
         "true",
         "yes",
     )
-    if force_b365 and b365_n > 0:
+    # Forced bet365 only while that board still covers live/upcoming games.
+    if force_b365 and b365_n > 0 and b365_upcoming:
         return b365
+    # Stale prefer flag + finished games → fall through to OddsPapi if it has next slate
+    if force_b365 and b365_n > 0 and not b365_upcoming and op_n > 0 and op_upcoming:
+        return _normalize_board_shape(
+            op, Path(op["path"]) if op.get("path") else ODDSPAPI_BOARD_PATH
+        )
 
-    op = load_oddspapi_board()
-    op_n = _board_player_count(op)
     if (
         b365_n > 0
+        and b365_upcoming
         and _board_fetched_at(b365)
-        and (not _board_fetched_at(op) or _board_fetched_at(b365) > _board_fetched_at(op))
+        and (
+            not _board_fetched_at(op)
+            or not op_upcoming
+            or _board_fetched_at(b365) > _board_fetched_at(op)
+        )
     ):
         return b365
 
@@ -363,31 +415,96 @@ def _scrape_has_points(book: str) -> bool:
     )
 
 
+def _books_on_board(board: dict[str, Any] | None) -> list[str]:
+    """Book slugs present on one board (OddsPapi or screenshot / Bet365 RapidAPI)."""
+    if not board:
+        return []
+    books = board_books(board) if board.get("source") == "oddspapi" else []
+    if books:
+        return list(books)
+    found: set[str] = set()
+    for b in board.get("books") or []:
+        found.add(str(b))
+    for p in iter_board_players(board):
+        found.update(str(b) for b in (p.get("odds_by_book") or {}))
+        found.update(str(b) for b in (p.get("ou_by_book") or {}))
+    if not found and board.get("source"):
+        # Legacy / RapidAPI bet365 boards often only expose `odds`, not odds_by_book keys
+        if board.get("source") in ("bet365 screenshots", "bet365 rapidapi", "screenshot"):
+            found.add(BOOK_BET365)
+        elif board.get("source"):
+            found.add(BOOK_BET365)
+    return sorted(found)
+
+
 def available_compare_books(
     board: dict[str, Any] | None = None,
     *,
     include_admiral: bool = True,
     include_scrapes: bool | None = None,
 ) -> list[str]:
-    """Books on the props board (+ local scrapes with Points when present)."""
+    """Books for Market cut pickers.
+
+    Unions the active board with OddsPapi multi-book props when that snapshot
+    exists — so Compare against still lists 1xBet / Superbet / 22bet / Stake
+    even if the active board is Bet365-only (RapidAPI backup / screenshots).
+    """
     board = board or load_props_board()
-    books = board_books(board) if board.get("source") == "oddspapi" else []
-    if not books:
-        found: set[str] = set()
-        for b in board.get("books") or []:
-            found.add(str(b))
-        for p in iter_board_players(board):
-            found.update(str(b) for b in (p.get("odds_by_book") or {}))
-            found.update(str(b) for b in (p.get("ou_by_book") or {}))
-        if not found and board.get("source"):
-            found.add(BOOK_BET365)
-        books = sorted(found)
+    books = list(_books_on_board(board))
+
+    # Supplemental OddsPapi catalog (may be stale vs active bet365 board)
+    if board.get("source") != "oddspapi":
+        op = load_oddspapi_board()
+        if _board_player_count(op) > 0:
+            for b in _books_on_board(op):
+                if b not in books:
+                    books.append(b)
+
     want_scrapes = include_admiral if include_scrapes is None else include_scrapes
     if want_scrapes:
         for slug in SCRAPE_BOOKS:
             if _scrape_has_points(slug) and slug not in books:
-                books = list(books) + [slug]
+                books.append(slug)
     return books
+
+
+def _match_player_on_board(
+    board: dict[str, Any],
+    name: str,
+    hint: str | None,
+) -> dict[str, Any] | None:
+    matched = None
+    best = 0
+    for p in iter_board_players(board):
+        score = _name_match_score(
+            name, p.get("player") or "", p.get("team_hint"), hint
+        )
+        if score > best:
+            best = score
+            matched = p
+    return matched if matched is not None and best > 0 else None
+
+
+def _quotes_for_book_any_board(
+    player: dict[str, Any],
+    book: str,
+    *,
+    supplemental_board: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Quotes for `book` on this player, falling back to OddsPapi board by name."""
+    direct = _quotes_for_book_on_player(player, book)
+    if direct:
+        return direct
+    if not supplemental_board or book in SCRAPE_BOOKS:
+        return []
+    matched = _match_player_on_board(
+        supplemental_board,
+        player.get("player") or "",
+        player.get("team_hint"),
+    )
+    if matched is None:
+        return []
+    return _quotes_for_book_on_player(matched, book)
 
 
 def _quotes_for_book_on_player(player: dict[str, Any], book: str) -> list[dict[str, Any]]:
@@ -583,6 +700,13 @@ def build_comparison(
     books_on_board = available_compare_books(board, include_admiral=False)
     all_books = available_compare_books(board, include_admiral=include_admiral)
 
+    # When active board is Bet365-only, still resolve 1xBet/Superbet/… from OddsPapi.
+    supplemental = None
+    if board.get("source") != "oddspapi":
+        op = load_oddspapi_board()
+        if _board_player_count(op) > 0:
+            supplemental = op
+
     primary = primary_book or (
         BOOK_BET365 if BOOK_BET365 in all_books else (all_books[0] if all_books else BOOK_BET365)
     )
@@ -703,19 +827,7 @@ def build_comparison(
         )
 
     def _match_board_player(name: str, hint: str | None):
-        board_players = iter_board_players(board)
-        matched_p = None
-        best_score = 0
-        for p in board_players:
-            score = _name_match_score(
-                name, p.get("player") or "", p.get("team_hint"), hint
-            )
-            if score > best_score:
-                best_score = score
-                matched_p = p
-        if matched_p is not None and best_score > 0:
-            return matched_p
-        return None
+        return _match_player_on_board(board, name, hint)
 
     if primary in SCRAPE_BOOKS:
         # Anchor on local scrape; match each line to OddsPapi / other scrapes.
@@ -746,11 +858,19 @@ def build_comparison(
                         close_tol=close_tol,
                     )
                 else:
-                    if matched_p is None:
-                        continue
+                    anchor = matched_p or {"player": name, "team_hint": hint}
+                    quotes = _quotes_for_book_any_board(
+                        anchor,
+                        other,
+                        supplemental_board=supplemental,
+                    )
+                    if not quotes and supplemental is not None and matched_p is None:
+                        mp = _match_player_on_board(supplemental, name, hint)
+                        if mp is not None:
+                            quotes = _quotes_for_book_on_player(mp, other)
                     oq, tier = _nearest_other_quote(
                         float(pq["line"]),
-                        _quotes_for_book_on_player(matched_p, other),
+                        quotes,
                         close_tol=close_tol,
                     )
                 if oq is None or tier == "none":
@@ -771,7 +891,9 @@ def build_comparison(
             hint = p.get("team_hint")
             event = p.get("event") or ""
             tip_off = p.get("tip_off")
-            primary_quotes = _quotes_for_book_on_player(p, primary)
+            primary_quotes = _quotes_for_book_any_board(
+                p, primary, supplemental_board=supplemental
+            )
             if not primary_quotes:
                 continue
 
@@ -779,7 +901,9 @@ def build_comparison(
             for b in others:
                 if b in SCRAPE_BOOKS:
                     continue
-                other_quote_maps[b] = _quotes_for_book_on_player(p, b)
+                other_quote_maps[b] = _quotes_for_book_any_board(
+                    p, b, supplemental_board=supplemental
+                )
 
             for pq in primary_quotes:
                 for other in others:
@@ -1174,22 +1298,31 @@ def _book_quote_rows(
             )
         return rows
 
-    for p in iter_board_players(board):
-        for q in _quotes_for_book_on_player(p, book):
-            rows.append(
-                {
-                    "book": book,
-                    "player": p.get("player") or "",
-                    "team_hint": p.get("team_hint"),
-                    "event": p.get("event") or "",
-                    "tip_off": p.get("tip_off"),
-                    "line": float(q["line"]),
-                    "milestone": q.get("milestone"),
-                    "over": q.get("over"),
-                    "under": q.get("under"),
-                    "has_real_under": bool(q.get("has_real_under")),
-                }
-            )
+    def _append_from(src_board: dict[str, Any]) -> int:
+        n = 0
+        for p in iter_board_players(src_board):
+            for q in _quotes_for_book_on_player(p, book):
+                rows.append(
+                    {
+                        "book": book,
+                        "player": p.get("player") or "",
+                        "team_hint": p.get("team_hint"),
+                        "event": p.get("event") or "",
+                        "tip_off": p.get("tip_off"),
+                        "line": float(q["line"]),
+                        "milestone": q.get("milestone"),
+                        "over": q.get("over"),
+                        "under": q.get("under"),
+                        "has_real_under": bool(q.get("has_real_under")),
+                    }
+                )
+                n += 1
+        return n
+
+    if _append_from(board) == 0 and board.get("source") != "oddspapi":
+        op = load_oddspapi_board()
+        if _board_player_count(op) > 0:
+            _append_from(op)
     return rows
 
 

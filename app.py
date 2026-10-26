@@ -59,6 +59,11 @@ from euro_market_compare import (
     odds_h2h_table_df,
     save_comparison,
 )
+from euro_bet365_rapid import (
+    api_ready as bet365_rapid_ready,
+    load_bet365_rapid_meta,
+    refresh_euroleague_bet365_points,
+)
 from euro_oddspapi import (
     DEFAULT_BOOKS,
     UNDER_CAPABLE_BOOKS,
@@ -1645,6 +1650,45 @@ def main() -> None:
                 button_key="market_cut_refresh_oddspapi",
                 show_book_picker=True,
             )
+            b365_ok, b365_reason = bet365_rapid_ready()
+            b365_meta = load_bet365_rapid_meta()
+            st.caption(
+                f"Bet365 RapidAPI players="
+                f"{(b365_meta.get('summary') or {}).get('players', 0)} · "
+                f"fetched={b365_meta.get('fetched_at') or '—'}"
+            )
+            if is_streamlit_cloud():
+                st.caption("Bet365 RapidAPI refresh is local-only.")
+            elif not b365_ok:
+                st.caption(b365_reason)
+            elif st.button(
+                "Refresh Bet365 (RapidAPI backup)",
+                key="market_cut_refresh_bet365_rapid",
+                help=(
+                    "Uses the same RapidAPI key against bet36528.p.rapidapi.com "
+                    "when OddsPapi quota is exhausted. Writes bet365_points_board.json."
+                ),
+            ):
+                with st.spinner("Fetching Bet365 Player Points via RapidAPI…"):
+                    try:
+                        result = refresh_euroleague_bet365_points(within_days=3.0)
+                        if result.get("error"):
+                            st.warning(result["error"])
+                            ui_log(f"Bet365 RapidAPI: {result}", "error")
+                        else:
+                            summ = result.get("summary") or {}
+                            st.success(
+                                f"Bet365 RapidAPI saved {summ.get('players', 0)} players "
+                                f"across {summ.get('games', 0)} games."
+                            )
+                            ui_log(f"Bet365 RapidAPI refresh: {summ}")
+                            st.rerun()
+                    except Exception as exc:  # noqa: BLE001
+                        ui_log(
+                            f"Bet365 RapidAPI failed: {exc}\n{traceback.format_exc()}",
+                            "error",
+                        )
+                        st.error(f"Bet365 RapidAPI failed: {exc}")
             board = load_props_board()
             n_games = len(board.get("games") or [])
             n_players = len(board_player_summary(board))
