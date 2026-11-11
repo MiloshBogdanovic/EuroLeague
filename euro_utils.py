@@ -41,6 +41,16 @@ def normalize_player_id(value) -> str:
     return text
 
 
+def _gamecode_series(series: pd.Series) -> pd.Series:
+    """Coerce Gamecode to nullable Int64 (NA-safe; never crashes on blank rows)."""
+    return pd.to_numeric(series, errors="coerce").astype("Int64")
+
+
+def _gamecode_int_set(series: pd.Series) -> set[int]:
+    gc = _gamecode_series(series).dropna()
+    return {int(x) for x in gc.tolist()}
+
+
 def _boxscore_with_retry(box: BoxScoreData, season: int, gamecode: int):
     """Fetch one boxscore with backoff on HTTP 429."""
     last_exc: Exception | None = None
@@ -212,13 +222,13 @@ def fetch_played_boxscores(
         played = played.head(max_games)
 
     if cache and cache_path.exists() and max_games is None:
-        cached = pd.read_csv(cache_path, parse_dates=["date"])
-        cached_games = set(cached["Gamecode"].astype(int).unique())
+        cached = _ensure_derived(pd.read_csv(cache_path, parse_dates=["date"]))
+        cached_games = _gamecode_int_set(cached["Gamecode"]) if not cached.empty else set()
         needed = set(played["game"].astype(int))
         if needed.issubset(cached_games):
             if not quiet:
                 print(f"  cache hit: {cache_path} ({len(cached)} rows)")
-            return _ensure_derived(cached)
+            return cached
 
     box = BoxScoreData("E")
     frames: list[pd.DataFrame] = []
@@ -252,6 +262,11 @@ def _ensure_derived(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "Player_ID" in out.columns:
         out["Player_ID"] = out["Player_ID"].map(normalize_player_id)
+    if "Gamecode" in out.columns:
+        out["Gamecode"] = _gamecode_series(out["Gamecode"])
+        # Blank / broken cache rows are useless for team/player joins
+        out = out.dropna(subset=["Gamecode"]).copy()
+        out["Gamecode"] = out["Gamecode"].astype(int)
     if "MinutesFloat" not in out.columns:
         out["MinutesFloat"] = out["Minutes"].map(parse_minutes)
     if "FGM3" not in out.columns:
@@ -283,7 +298,8 @@ def fetch_game_metadata(season: int, *, cache: bool = True, quiet: bool = False)
 
     if cache and cache_path.exists():
         cached = pd.read_csv(cache_path)
-        if set(played["game"].astype(int)).issubset(set(cached["Gamecode"].astype(int))):
+        cached_gc = _gamecode_int_set(cached["Gamecode"]) if "Gamecode" in cached.columns else set()
+        if set(played["game"].astype(int)).issubset(cached_gc):
             if not quiet:
                 print(f"  cache hit: {cache_path}")
             return cached
@@ -847,8 +863,12 @@ def fetch_boxscores_for_games(
     have: set[int] = set()
     if cache_path.exists():
         cached = _ensure_derived(pd.read_csv(cache_path, parse_dates=["date"]))
-        have = set(cached["Gamecode"].astype(int).unique())
-        hit = cached[cached["Gamecode"].astype(int).isin(wanted)]
+        have = _gamecode_int_set(cached["Gamecode"]) if not cached.empty else set()
+        hit = (
+            cached[cached["Gamecode"].isin(list(wanted))].copy()
+            if not cached.empty
+            else pd.DataFrame()
+        )
         missing = wanted - have
         if not missing:
             return hit
@@ -893,8 +913,10 @@ def fetch_boxscores_for_games(
     parts = [p for p in (hit, fetched) if p is not None and not p.empty]
     if not parts:
         return pd.DataFrame()
-    out = pd.concat(parts, ignore_index=True)
-    return out[out["Gamecode"].astype(int).isin(wanted)]
+    out = _ensure_derived(pd.concat(parts, ignore_index=True))
+    if out.empty or "Gamecode" not in out.columns:
+        return out
+    return out[out["Gamecode"].isin(list(wanted))].copy()
 
 
 def player_clubs_in_season(season: int, player_id: str) -> list[str]:
