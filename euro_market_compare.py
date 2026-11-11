@@ -299,27 +299,49 @@ def board_player_summary(
     """
     board = board or load_props_board()
     if primary_book and primary_book in SCRAPE_BOOKS:
+        board_players = iter_board_players(board)
         by_name: dict[str, dict[str, Any]] = {}
         for q in _scrape_points_index(primary_book):
             name = q.get("player") or ""
             if not name:
                 continue
+            hint = q.get("team")
+            event = ""
+            tip_off = None
+            best = 0
+            for p in board_players:
+                score = _name_match_score(
+                    name, p.get("player") or "", p.get("team_hint"), hint
+                )
+                if score > best:
+                    best = score
+                    event = p.get("event") or ""
+                    tip_off = p.get("tip_off")
+            key = _norm_name(name)
             row = by_name.setdefault(
-                _norm_name(name),
+                key,
                 {
-                    "event": "",
-                    "tip_off": None,
+                    "event": event if best > 0 else "",
+                    "tip_off": tip_off if best > 0 else None,
                     "player": name,
-                    "team_hint": q.get("team"),
+                    "team_hint": hint,
                     "books": primary_book,
                     "milestones": [],
                     "n_milestones": 0,
                 },
             )
+            # Keep strongest event match if we see the player again
+            if best > 0 and not row.get("event"):
+                row["event"] = event
+                row["tip_off"] = tip_off
             ms = q.get("milestone")
             over = q.get("over")
+            under = q.get("under")
             if ms is not None and over is not None:
-                row["milestones"].append(f"{ms}@{over}")
+                bit = f"{ms}@{over}"
+                if under is not None:
+                    bit += f"/U{under}"
+                row["milestones"].append(bit)
         out = []
         for row in by_name.values():
             ms_list = sorted(
@@ -333,7 +355,10 @@ def board_player_summary(
                     "n_milestones": len(ms_list),
                 }
             )
-        return sorted(out, key=lambda r: (r.get("team_hint") or "", r.get("player") or ""))
+        return sorted(
+            out,
+            key=lambda r: (r.get("event") or "", r.get("team_hint") or "", r.get("player") or ""),
+        )
 
     rows = []
     for p in iter_board_players(board):

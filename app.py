@@ -1158,9 +1158,24 @@ def _render_market_gaps_tab() -> None:
                     "or refresh OddsPapi / scrapes from the sidebar."
                 )
         else:
-            show = players if pick == "All games" else [p for p in players if p.get("event") == pick]
+            if pick == "All games":
+                show = players
+            else:
+                show = [p for p in players if p.get("event") == pick]
+                # Scrape primaries may lack an event match — keep unmatched rows
+                # when filtering so the table is not blank.
+                if not show and primary in SCRAPE_BOOKS:
+                    show = [p for p in players if not (p.get("event") or "").strip()]
+                    if show:
+                        st.caption(
+                            "No scrape names matched this board game; showing "
+                            "unassigned scrape players. Try **All games**."
+                        )
             st.caption("Table only compares these players to the other selected books.")
-            st.dataframe(pd.DataFrame(show), width="stretch", hide_index=True)
+            if not show:
+                st.info("No primary-book players for this game filter.")
+            else:
+                st.dataframe(pd.DataFrame(show), width="stretch", hide_index=True)
 
     if not cmp_payload:
         return
@@ -1236,15 +1251,67 @@ def _render_market_gaps_tab() -> None:
 
     other_arg = None if other_filter == "All books" else other_filter
 
+    def _drop_empty_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """Hide columns that are entirely null / blank for the current view."""
+        if df.empty:
+            return df
+        keep = []
+        for col in df.columns:
+            series = df[col]
+            if series.isna().all():
+                continue
+            if series.dtype == object and series.fillna("").astype(str).str.strip().eq("").all():
+                continue
+            keep.append(col)
+        return df[keep] if keep else df
+
+    def _filter_has_under(df: pd.DataFrame) -> pd.DataFrame:
+        """Keep rows with a real Under price on primary and/or other book."""
+        if df.empty:
+            return df
+        p_under = f"{primary_label}_under"
+        mask = pd.Series(False, index=df.index)
+        if "other_under" in df.columns:
+            mask = mask | df["other_under"].notna()
+        if p_under in df.columns:
+            mask = mask | df[p_under].notna()
+        if "other_under_real" in df.columns:
+            mask = mask | df["other_under_real"].fillna(False).astype(bool)
+        if "primary_under_real" in df.columns:
+            mask = mask | df["primary_under_real"].fillna(False).astype(bool)
+        return df.loc[mask].reset_index(drop=True)
+
     st.subheader("1) Exact same line")
     st.markdown(
         f"**Over gap** = {book_label(primary_label)} Over − other Over "
         f"(negative = primary shorter). Exact rows: "
         f"**{summ.get('exact_half_line_matches', 0)}**."
     )
+    x1, x2 = st.columns([1.4, 1])
+    with x1:
+        exact_under_only = st.checkbox(
+            "Only rows with Under odds",
+            value=False,
+            key="market_cut_exact_under_only",
+            help="Hide exact-line pairs where neither side posts a real Under price.",
+        )
+    with x2:
+        hide_empty_cols = st.checkbox(
+            "Hide empty columns",
+            value=True,
+            key="market_cut_hide_empty_cols",
+            help="Drop columns that are blank for every visible row.",
+        )
     exact_df = _filter_view(comparison_table_df(cmp_payload, tier="exact", other_book=other_arg))
+    if exact_under_only and not exact_df.empty:
+        exact_df = _filter_has_under(exact_df)
+    if hide_empty_cols and not exact_df.empty:
+        exact_df = _drop_empty_columns(exact_df)
     if exact_df.empty:
-        st.info("No exact line overlaps for this filter.")
+        st.info(
+            "No exact line overlaps for this filter."
+            + (" Try turning off **Only rows with Under odds**." if exact_under_only else "")
+        )
     else:
         _gap_metrics(exact_df, "Exact-match gap highlights")
         st.caption("🔴 MASSIVE undercut · 🟠 undercut · 🟢 primary longer")
@@ -1253,6 +1320,8 @@ def _render_market_gaps_tab() -> None:
     st.subheader(f"2) Close lines (|other − primary| ≤ {close_tol:g})")
     st.caption("Same gap math when the other book’s line is only near the primary line.")
     close_df = _filter_view(comparison_table_df(cmp_payload, tier="close", other_book=other_arg))
+    if hide_empty_cols and not close_df.empty:
+        close_df = _drop_empty_columns(close_df)
     if close_df.empty:
         st.info(f"No close-line pairs within ±{close_tol:g} for this filter.")
     else:
@@ -1265,6 +1334,8 @@ def _render_market_gaps_tab() -> None:
         expanded=False,
     ):
         far_df = _filter_view(comparison_table_df(cmp_payload, tier="far", other_book=other_arg))
+        if hide_empty_cols and not far_df.empty:
+            far_df = _drop_empty_columns(far_df)
         if far_df.empty:
             st.caption("None.")
         else:
