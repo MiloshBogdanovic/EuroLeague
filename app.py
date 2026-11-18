@@ -80,6 +80,7 @@ from euro_oddspapi import (
 from euro_utils import (
     DATA_DIR,
     annotate_vs_specific_defenders,
+    attach_opponent,
     current_gameday,
     filter_player_vs_opponent,
     likely_positional_defenders,
@@ -146,6 +147,7 @@ TEAM_FORM_COLS = [
     ("gp", "GP"),
     ("min_avg", "Min"),
     ("pts_avg", "PTS"),
+    ("pts_per_min", "PTS/min"),
     ("reb_avg", "REB"),
     ("fgm3_avg", "3PM"),
     ("fga3_avg", "3PA"),
@@ -660,18 +662,34 @@ def render_logs_panel() -> None:
         st.code("\n".join(logs[-80:]), language="text")
 
 
+def _ensure_pts_per_min(form: pd.DataFrame) -> pd.DataFrame:
+    """Add pts_per_min when missing (e.g. older cached team_form CSV)."""
+    if form.empty:
+        return form
+    out = form.copy()
+    if "pts_per_min" not in out.columns or out["pts_per_min"].isna().all():
+        mins = pd.to_numeric(out.get("min_avg"), errors="coerce").replace(0, np.nan)
+        pts = pd.to_numeric(out.get("pts_avg"), errors="coerce")
+        out["pts_per_min"] = pts / mins
+    return out
+
+
 def _top_leaders(form: pd.DataFrame, metric: str, n: int = 3, min_minutes: float = 8.0) -> pd.DataFrame:
     """Top-n players by a season metric (rotation filter)."""
     if form.empty or metric not in form.columns:
         return pd.DataFrame()
-    use = form[form["min_avg"].fillna(0) >= min_minutes].copy()
+    use = _ensure_pts_per_min(form)
+    use = use[use["min_avg"].fillna(0) >= min_minutes].copy()
     if use.empty:
-        use = form.copy()
+        use = _ensure_pts_per_min(form)
     cols = ["Player", "gp", "min_avg", metric]
+    if metric == "pts_avg" and "pts_per_min" in use.columns:
+        cols.append("pts_per_min")
     if metric == "fgm3_avg" and "fga3_avg" in use.columns:
         cols.append("fga3_avg")
     cols = [c for c in cols if c in use.columns]
-    return _round(use.sort_values(metric, ascending=False).head(n)[cols])
+    out = _round(use.sort_values(metric, ascending=False).head(n)[cols])
+    return out.rename(columns={"pts_per_min": "PTS/min"})
 
 
 def _h2h_player_form(h2h_logs: pd.DataFrame) -> pd.DataFrame:
@@ -684,6 +702,8 @@ def _h2h_player_form(h2h_logs: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for pid, grp in use.groupby("Player_ID"):
         reb = pd.to_numeric(grp.get("TotalRebounds"), errors="coerce")
+        min_tot = float(grp["MinutesFloat"].sum())
+        pts_tot = float(pd.to_numeric(grp["Points"], errors="coerce").sum())
         rows.append(
             {
                 "Player_ID": normalize_player_id(pid),
@@ -691,10 +711,11 @@ def _h2h_player_form(h2h_logs: pd.DataFrame) -> pd.DataFrame:
                 "gp": int(len(grp)),
                 "min_avg": float(grp["MinutesFloat"].mean()),
                 "pts_avg": float(grp["Points"].mean()),
+                "pts_per_min": (pts_tot / min_tot) if min_tot else float("nan"),
                 "reb_avg": float(reb.mean()) if reb is not None else float("nan"),
                 "fgm3_avg": float(grp["FGM3"].mean()),
                 "fga3_avg": float(grp["FGA3"].mean()),
-                "pts_tot": float(grp["Points"].sum()),
+                "pts_tot": pts_tot,
                 "reb_tot": float(reb.sum()) if reb is not None else float("nan"),
                 "fgm3_tot": float(grp["FGM3"].sum()),
             }
@@ -706,11 +727,15 @@ def _h2h_top_leaders(form: pd.DataFrame, metric: str, n: int = 3) -> pd.DataFram
     """Top-n from H2H-only form (no season-minutes filter — sample is already small)."""
     if form.empty or metric not in form.columns:
         return pd.DataFrame()
+    use = _ensure_pts_per_min(form)
     cols = ["Player", "gp", "min_avg", metric]
-    if metric == "fgm3_avg" and "fga3_avg" in form.columns:
+    if metric == "pts_avg" and "pts_per_min" in use.columns:
+        cols.append("pts_per_min")
+    if metric == "fgm3_avg" and "fga3_avg" in use.columns:
         cols.append("fga3_avg")
-    cols = [c for c in cols if c in form.columns]
-    return _round(form.sort_values(metric, ascending=False).head(n)[cols])
+    cols = [c for c in cols if c in use.columns]
+    out = _round(use.sort_values(metric, ascending=False).head(n)[cols])
+    return out.rename(columns={"pts_per_min": "PTS/min"})
 
 
 def _render_category_leaders(
@@ -734,7 +759,7 @@ def _render_category_leaders(
 
 def render_season_top3(form: pd.DataFrame, season: int, team_code: str) -> None:
     st.markdown(f"**Top 3 this season ({season})**")
-    st.caption(f"Season averages for {_label(team_code)} (rotation ≥8 min).")
+    st.caption(f"Season averages for {_label(team_code)} (rotation ≥8 min). Points table includes PTS/min.")
     c1, c2, c3 = st.columns(3)
     with c1:
         st.caption("Points")
@@ -745,6 +770,69 @@ def render_season_top3(form: pd.DataFrame, season: int, team_code: str) -> None:
     with c3:
         st.caption("Rebounds")
         st.dataframe(_top_leaders(form, "reb_avg"), width="stretch", hide_index=True)
+
+
+def _venue_form_from_logs(
+    logs: pd.DataFrame,
+    *,
+    home_away: str,
+    roster_ids: set[str] | None = None,
+) -> pd.DataFrame:
+    """Season form limited to home (H) or away (A) games."""
+    if logs.empty:
+        return pd.DataFrame()
+    use = logs.copy()
+    if "HomeAway" not in use.columns:
+        if "home_team" in use.columns and "Team" in use.columns:
+            use = attach_opponent(use)
+        else:
+            return pd.DataFrame()
+    use = use[use["HomeAway"].astype(str).str.upper() == home_away.upper()]
+    if use.empty:
+        return pd.DataFrame()
+    form = team_player_form_table(use)
+    if form.empty:
+        return form
+    form["Player_ID"] = form["Player_ID"].map(normalize_player_id)
+    if roster_ids:
+        form = form[form["Player_ID"].isin(roster_ids)].copy()
+    return _ensure_pts_per_min(form)
+
+
+def render_home_away_top3(
+    season: int,
+    home_code: str,
+    away_code: str,
+    *,
+    home_logs: pd.DataFrame | None = None,
+    away_logs: pd.DataFrame | None = None,
+) -> None:
+    """Top 3 for next home team in home games + away team in away games."""
+    st.markdown(f"**Top 3 by venue ({season})**")
+    st.caption(
+        f"Home side `{_label(home_code)}` in **home** games · "
+        f"Away side `{_label(away_code)}` in **away** games "
+        "(same Points / 3PM / Rebounds tables)."
+    )
+    try:
+        h_logs = home_logs if home_logs is not None else cached_team_logs(season, home_code)
+        a_logs = away_logs if away_logs is not None else cached_team_logs(season, away_code)
+        home_form = _venue_form_from_logs(
+            h_logs, home_away="H", roster_ids=_current_roster_ids(season, home_code)
+        )
+        away_form = _venue_form_from_logs(
+            a_logs, home_away="A", roster_ids=_current_roster_ids(season, away_code)
+        )
+    except Exception as exc:  # noqa: BLE001
+        ui_log(f"Home/away top3 failed: {exc}\n{traceback.format_exc()}", "error")
+        st.caption(f"Home/away splits unavailable: {exc}")
+        return
+
+    left, right = st.columns(2)
+    with left:
+        _render_category_leaders(f"{_label(home_code)} at home", home_form, h2h=False)
+    with right:
+        _render_category_leaders(f"{_label(away_code)} on road", away_form, h2h=False)
 
 
 def _current_roster_ids(season: int, team: str, form: pd.DataFrame | None = None) -> set[str]:
@@ -823,6 +911,23 @@ def render_h2h_block(season: int, team_code: str, our_form: pd.DataFrame) -> Non
         _render_category_leaders(_label(team_code), our_h2h_form, h2h=True)
     with right:
         _render_category_leaders(_label(rival), opp_h2h_form, h2h=True)
+
+    if next_row is not None:
+        home_code = str(next_row.get("homecode") or "").upper()
+        away_code = str(next_row.get("awaycode") or "").upper()
+        if home_code and away_code:
+            st.divider()
+            # Reuse already-loaded logs when this team is home or away
+            our_logs = st.session_state.get("team_logs")
+            home_logs = our_logs if home_code == team_code.upper() else None
+            away_logs = our_logs if away_code == team_code.upper() else None
+            render_home_away_top3(
+                season,
+                home_code,
+                away_code,
+                home_logs=home_logs,
+                away_logs=away_logs,
+            )
 
 
 def render_market_cut_page() -> None:
@@ -1952,35 +2057,86 @@ def main() -> None:
         "last 5 / last 3 games (with only 2 games played, L5 ≈ L3 ≈ season)."
     )
 
-    c1, c2, c3, c4 = st.columns(4)
+    team_games = int(logs["Gamecode"].nunique())
+    # Ignore tiny samples (e.g. 1–2 GP) when crowning "best" season leaders
+    min_gp_leaders = max(3, int(np.ceil(team_games * 0.4))) if team_games else 3
+    form_q = _ensure_pts_per_min(form)
+    qualified = form_q[form_q["gp"].fillna(0) >= min_gp_leaders].copy()
+    if qualified.empty:
+        qualified = form_q.copy()
+
+    def _best_row(df: pd.DataFrame, metric_col: str) -> pd.Series | None:
+        if df.empty or metric_col not in df.columns or df[metric_col].isna().all():
+            return None
+        return df.loc[df[metric_col].idxmax()]
+
+    best_pir = _best_row(qualified, "pir_per_min")
+    best_pts = _best_row(qualified, "pts_avg")
+    best_ppm = _best_row(qualified, "pts_per_min")
+
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Players", len(form))
-    c2.metric("Games in sample", int(logs["Gamecode"].nunique()))
-    top = form.sort_values("pir_per_min", ascending=False).iloc[0]
-    c3.metric("Best PIR/min", f"{top['pir_per_min']:.2f}", top["Player"])
-    c4.metric("Best PTS", f"{form['pts_avg'].max():.1f}", form.loc[form["pts_avg"].idxmax(), "Player"])
+    c2.metric("Games in sample", team_games)
+    if best_pir is not None:
+        c3.metric(
+            "Best PIR/min",
+            f"{best_pir['pir_per_min']:.2f}",
+            f"{best_pir['Player']} · {int(best_pir['gp'])} GP",
+        )
+    else:
+        c3.metric("Best PIR/min", "—")
+    if best_pts is not None:
+        c4.metric(
+            "Best PTS",
+            f"{best_pts['pts_avg']:.1f}",
+            f"{best_pts['Player']} · {int(best_pts['gp'])} GP",
+        )
+    else:
+        c4.metric("Best PTS", "—")
+    if best_ppm is not None:
+        c5.metric(
+            "Best PTS/min",
+            f"{best_ppm['pts_per_min']:.2f}",
+            f"{best_ppm['Player']} · {int(best_ppm['gp'])} GP",
+        )
+    else:
+        c5.metric("Best PTS/min", "—")
+    st.caption(
+        f"Leader cards require ≥**{min_gp_leaders}** GP "
+        f"(~40% of {team_games} team games) so one-off outings don’t top the board."
+    )
 
     metric = st.selectbox(
         "Sort / chart metric",
-        options=["pir_per_min", "pts_avg", "reb_avg", "fgm3_avg", "min_avg", "pir_avg"],
+        options=["pir_per_min", "pts_avg", "pts_per_min", "reb_avg", "fgm3_avg", "min_avg", "pir_avg"],
         format_func=lambda x: {
             "pir_per_min": "PIR / min",
             "pts_avg": "Points",
+            "pts_per_min": "PTS / min",
             "reb_avg": "Rebounds",
             "fgm3_avg": "3PM",
             "min_avg": "Minutes",
             "pir_avg": "PIR",
         }[x],
     )
-    sorted_form = form.sort_values(metric, ascending=False)
+    sort_form = _ensure_pts_per_min(form)
+    if metric not in sort_form.columns:
+        metric = "pir_per_min"
+    sorted_form = sort_form.sort_values(metric, ascending=False)
     render_team_table(sorted_form)
-    render_season_top3(form, season_i, team_code)
+    render_season_top3(sorted_form, season_i, team_code)
 
     rot = sorted_form[sorted_form["min_avg"] > 10].head(12).copy()
     if not rot.empty and "pts_L3" in rot.columns:
-        st.markdown("**Season PTS vs last-3 PTS (rotation, >10 min)**")
-        cmp = rot.set_index("Player")[["pts_avg", "pts_L3"]].rename(
-            columns={"pts_avg": "Season PTS", "pts_L3": "Last 3 PTS"}
-        )
+        st.markdown("**Season PTS vs last-5 / last-3 PTS (rotation, >10 min)**")
+        chart_cols = {"pts_avg": "Season PTS", "pts_L3": "Last 3 PTS"}
+        if "pts_L5" in rot.columns:
+            chart_cols = {
+                "pts_avg": "Season PTS",
+                "pts_L5": "Last 5 PTS",
+                "pts_L3": "Last 3 PTS",
+            }
+        cmp = rot.set_index("Player")[list(chart_cols.keys())].rename(columns=chart_cols)
         st.bar_chart(cmp, height=320)
 
     render_h2h_block(season_i, team_code, form)

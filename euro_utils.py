@@ -1051,6 +1051,7 @@ def window_metrics(df: pd.DataFrame, label: str) -> dict:
         "fg3_pct": np.nan,
         "pir_avg": np.nan,
         "pir_per_min": np.nan,
+        "pts_per_min": np.nan,
     }
     if df is None or df.empty:
         return empty
@@ -1059,6 +1060,7 @@ def window_metrics(df: pd.DataFrame, label: str) -> dict:
         return empty
     min_tot = use["MinutesFloat"].sum()
     pir_tot = use["Valuation"].sum()
+    pts_tot = pd.to_numeric(use["Points"], errors="coerce").sum()
     fgm = use["FGM3"].sum()
     fga = use["FGA3"].sum()
     reb = pd.to_numeric(use.get("TotalRebounds"), errors="coerce")
@@ -1078,6 +1080,7 @@ def window_metrics(df: pd.DataFrame, label: str) -> dict:
         "fg3_pct": float(100 * fgm / fga) if fga else np.nan,
         "pir_avg": float(use["Valuation"].mean()),
         "pir_per_min": float(pir_tot / min_tot) if min_tot else np.nan,
+        "pts_per_min": float(pts_tot / min_tot) if min_tot else np.nan,
     }
 
 
@@ -1118,6 +1121,7 @@ def team_player_form_table(team_logs: pd.DataFrame) -> pd.DataFrame:
                 "gp": season["games"],
                 "min_avg": season["min_avg"],
                 "pts_avg": season["pts_avg"],
+                "pts_per_min": season["pts_per_min"],
                 "reb_avg": season["reb_avg"],
                 "fgm3_avg": season["fgm3_avg"],
                 "fga3_avg": season["fga3_avg"],
